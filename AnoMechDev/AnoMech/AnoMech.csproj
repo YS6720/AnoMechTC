@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 台服(TC)移植：上游用 Dalamud.NET.Sdk 15（net10／國際服），台服 Dalamud fork
+     是 API 13（net9），兩者不相容，故降至 13。 -->
+<Project Sdk="Dalamud.NET.Sdk/13.0.0">
+
+  <PropertyGroup>
+    <Authors>Anomek（上游）; anomech-tc 台服移植</Authors>
+    <Version>0.20.0.1</Version>
+    <Description>Simulate ultimate raid mechanics locally or with a self-hosted TC relay</Description>
+    <RootNamespace>AnoMech</RootNamespace>
+    <PackageProjectUrl>https://github.com/anomek/AnoMech</PackageProjectUrl>
+    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+    <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- 預設只落到版別隔離的 bin/；release.ps1 以命令列明確指定原本
+         $OutputRoot\AnoMech 部署目標，配對 producer 則指定自己的 staging。 -->
+    <OutputPath>$(AnoMechOutputPath)</OutputPath>
+    <BaseIntermediateOutputPath>$(AnoMechIntermediatePath)</BaseIntermediateOutputPath>
+    <IntermediateOutputPath>$(AnoMechIntermediatePath)</IntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(AnoMechExtensionsPath)</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+
+
+  <!-- 台服 Dalamud 來源的斷言（DalamudLibPath 本身設在 repo 根的 Directory.Build.props，
+       因為 Sdk.props 早於本檔求值——理由詳見該檔註解）。
+
+       這裡驗的是**實際解析到的參考路徑**，不是「屬性有沒有設」。
+       2026-08-18 實證：屬性設了但 SDK 忽略、靜默落回國際服 Dalamud 15，
+       只檢查屬性的斷言完全沒攔下來（且錯誤數還變少，看起來像進度）。 -->
+  <Target Name="AssertTcDalamud" AfterTargets="ResolveReferences">
+    <PropertyGroup>
+      <_DalamudRefPath>@(ReferencePath->WithMetadataValue('Filename','Dalamud')->'%(FullPath)')</_DalamudRefPath>
+    </PropertyGroup>
+    <Error Condition="'$(_DalamudRefPath)' == ''"
+           Text="建置未解析到 Dalamud 參考——DalamudLibPath=$(DalamudLibPath)" />
+    <Error Condition="!$(_DalamudRefPath.Contains('FFXIVSimpleLauncher'))"
+           Text="Dalamud 來源不是台服！實際解析到：$(_DalamudRefPath)（預期路徑含 FFXIVSimpleLauncher）。國際服 Dalamud 15/net10 與台服 API 13/net9 不相容，編得過也不能用。" />
+  </Target>
+
+  <!-- 供受控配對 producer 比對「實際」編譯輸入。清單本身不信任檔名：
+       producer 會對每個 path 重新讀取內容 SHA256，並拒絕未知分類或差異。 -->
+  <Target Name="GenerateAnoMechBuildIdentity" BeforeTargets="CoreCompile">
+    <MakeDir Directories="$(AnoMechIntermediatePath)" />
+    <ItemGroup>
+      <_AnoMechIdentitySourceLine Include="namespace AnoMech%3B" />
+      <_AnoMechIdentitySourceLine Include="internal static class BuildEditionPair" />
+      <_AnoMechIdentitySourceLine Include="{" />
+      <_AnoMechIdentitySourceLine Include="    internal const string Id = &quot;$(AnoMechBuildPairId)&quot;%3B" />
+      <_AnoMechIdentitySourceLine Include="}" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(AnoMechBuildIdentitySource)"
+                      Lines="@(_AnoMechIdentitySourceLine)" Overwrite="true" />
+  </Target>
+
+  <Target Name="CaptureAnoMechBuildInputsBefore"
+          BeforeTargets="CoreCompile"
+          DependsOnTargets="ResolveReferences;GenerateAnoMechBuildIdentity"
+          Condition="'$(AnoMechBuildPairId)' != ''">
+    <Error Condition="'$(AnoMechBuildImportManifest)' == '' Or !Exists('$(AnoMechBuildImportManifest)')"
+           Text="配對建置必須由 producer 提供完整 resolved import graph。" />
+    <ReadLinesFromFile File="$(AnoMechBuildImportManifest)">
+      <Output TaskParameter="Lines" ItemName="_AnoMechImport" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <_AnoMechInputLine Include="property|AnoMechEdition|$(AnoMechEdition)" />
+      <_AnoMechInputLine Include="property|Configuration|$(Configuration)" />
+      <_AnoMechInputLine Include="property|Platform|$(Platform)" />
+      <_AnoMechInputLine Include="property|TargetFramework|$(TargetFramework)" />
+      <_AnoMechInputLine Include="property|TargetFrameworkIdentifier|$(TargetFrameworkIdentifier)" />
+      <_AnoMechInputLine Include="property|TargetPlatformIdentifier|$(TargetPlatformIdentifier)" />
+      <_AnoMechInputLine Include="property|PlatformTarget|$(PlatformTarget)" />
+      <_AnoMechInputLine Include="property|RuntimeIdentifier|$(RuntimeIdentifier)" />
+      <_AnoMechInputLine Include="property|LangVersion|$(LangVersion)" />
+      <_AnoMechInputLine Include="property|Nullable|$(Nullable)" />
+      <_AnoMechInputLine Include="property|DefineConstants|$([System.String]::Copy('$(DefineConstants)').Replace(';','%3B'))" />
+      <_AnoMechInputLine Include="property|Optimize|$(Optimize)" />
+      <_AnoMechInputLine Include="property|DebugType|$(DebugType)" />
+      <_AnoMechInputLine Include="property|DebugSymbols|$(DebugSymbols)" />
+      <_AnoMechInputLine Include="property|Deterministic|$(Deterministic)" />
+      <_AnoMechInputLine Include="property|PathMap|$([System.String]::Copy('$(PathMap)').Replace(';','%3B'))" />
+      <_AnoMechInputLine Include="property|NoWarn|$([System.String]::Copy('$(NoWarn)').Replace(';','%3B'))" />
+      <_AnoMechInputLine Include="property|WarningsAsErrors|$([System.String]::Copy('$(WarningsAsErrors)').Replace(';','%3B'))" />
+      <_AnoMechInputLine Include="property|TreatWarningsAsErrors|$(TreatWarningsAsErrors)" />
+      <_AnoMechInputLine Include="property|AllowUnsafeBlocks|$(AllowUnsafeBlocks)" />
+      <_AnoMechInputLine Include="property|GenerateDocumentationFile|$(GenerateDocumentationFile)" />
+      <_AnoMechInputLine Include="property|CheckForOverflowUnderflow|$(CheckForOverflowUnderflow)" />
+      <_AnoMechInputLine Include="property|EnableDefaultCompileItems|$(EnableDefaultCompileItems)" />
+      <_AnoMechInputLine Include="property|EnableDefaultNoneItems|$(EnableDefaultNoneItems)" />
+      <_AnoMechInputLine Include="property|MSBuildToolsVersion|$(MSBuildToolsVersion)" />
+      <_AnoMechInputLine Include="property|MSBuildRuntimeType|$(MSBuildRuntimeType)" />
+      <_AnoMechInputLine Include="property|MSBuildSDKsPath|$(MSBuildSDKsPath)" />
+      <_AnoMechInputLine Include="property|NETCoreSdkVersion|$(NETCoreSdkVersion)" />
+      <_AnoMechInputLine Include="property|RoslynTargetsPath|$(RoslynTargetsPath)" />
+      <_AnoMechInputLine Include="property|CscToolPath|$(CscToolPath)" />
+      <_AnoMechInputLine Include="property|CscToolExe|$(CscToolExe)" />
+      <_AnoMechInputLine Include="property|SdkRootPath|$(SdkRootPath)" />
+      <_AnoMechInputLine Include="property|ProjectAssetsFile|$(ProjectAssetsFile)" />
+      <_AnoMechInputLine Include="property|DALAMUD_HOME|$(DALAMUD_HOME)" />
+      <_AnoMechInputLine Include="property|DalamudLibPath|$(DalamudLibPath)" />
+      <_AnoMechInputLine Include="property|AssemblyName|$(AssemblyName)" />
+      <_AnoMechInputLine Include="property|RootNamespace|$(RootNamespace)" />
+      <_AnoMechInputLine Include="property|WarningLevel|$(WarningLevel)" />
+      <_AnoMechInputLine Include="property|ErrorReport|$(ErrorReport)" />
+      <_AnoMechInputLine Include="property|ImplicitUsings|$(ImplicitUsings)" />
+      <_AnoMechInputLine Include="property|Features|$([System.String]::Copy('$(Features)').Replace(';','%3B'))" />
+      <_AnoMechInputLine Include="property|EmitCompilerGeneratedFiles|$(EmitCompilerGeneratedFiles)" />
+      <_AnoMechInputLine Include="property|ProvideCommandLineArgs|$(ProvideCommandLineArgs)" />
+      <_AnoMechInputLine Include="property|CompilerGeneratedFilesOutputPath|$(CompilerGeneratedFilesOutputPath)" />
+      <_AnoMechInputLine Include="property|GenerateAssemblyInfo|$(GenerateAssemblyInfo)" />
+      <_AnoMechInputLine Include="property|GenerateTargetFrameworkAttribute|$(GenerateTargetFrameworkAttribute)" />
+      <_AnoMechInputLine Include="property|ProduceReferenceAssembly|$(ProduceReferenceAssembly)" />
+      <_AnoMechInputLine Include="property|PreserveCompilationContext|$(PreserveCompilationContext)" />
+      <_AnoMechInputLine Include="property|OutputPath|$(OutputPath)" />
+      <_AnoMechInputLine Include="property|BaseOutputPath|$(BaseOutputPath)" />
+      <_AnoMechInputLine Include="property|AnoMechBaseOutputPath|$(AnoMechBaseOutputPath)" />
+      <_AnoMechInputLine Include="property|AppendTargetFrameworkToOutputPath|$(AppendTargetFrameworkToOutputPath)" />
+      <_AnoMechInputLine Include="property|AppendPlatformToOutputPath|$(AppendPlatformToOutputPath)" />
+      <_AnoMechInputLine Include="property|BaseIntermediateOutputPath|$(BaseIntermediateOutputPath)" />
+      <_AnoMechInputLine Include="property|IntermediateOutputPath|$(IntermediateOutputPath)" />
+      <_AnoMechInputLine Include="property|MSBuildProjectExtensionsPath|$(MSBuildProjectExtensionsPath)" />
+      <_AnoMechInputLine Include="property|AnoMechBuildRoot|$(AnoMechBuildRoot)" />
+      <_AnoMechInputLine Include="property|AnoMechBuildPairId|$(AnoMechBuildPairId)" />
+      <_AnoMechInputLine Include="property|AnoMechBuildIdentitySource|$(AnoMechBuildIdentitySource)" />
+      <_AnoMechInputLine Include="property|AnoMechBuildInputManifest|$(AnoMechBuildInputManifest)" />
+      <_AnoMechInputLine Include="@(_AnoMechImport->'import|%(Identity)')" />
+      <_AnoMechInputLine Include="@(Compile->'compile|%(FullPath)|%(Link)')" />
+      <_AnoMechInputLine Include="@(ReferencePath->'reference|%(FullPath)|%(Filename)%(Extension)')" />
+      <_AnoMechInputLine Include="@(ReferencePathWithRefAssemblies->'reference-ref|%(FullPath)|%(Filename)%(Extension)')" />
+      <_AnoMechInputLine Include="@(Analyzer->'analyzer|%(FullPath)|%(OutputItemType)|%(TreatAsPackageReference)')" />
+      <_AnoMechInputLine Include="@(AdditionalFiles->'additional|%(FullPath)')" />
+      <_AnoMechInputLine Include="@(EditorConfigFiles->'editorconfig|%(FullPath)')" />
+      <_AnoMechInputLine Include="@(EmbeddedResource->'embedded-resource|%(FullPath)|%(ManifestResourceName)')" />
+      <_AnoMechInputLine Include="@(Resource->'resource|%(FullPath)')" />
+      <_AnoMechInputLine Include="@(Content->'content|%(FullPath)|%(CopyToOutputDirectory)')" />
+      <_AnoMechInputLine Include="@(None->'none|%(FullPath)|%(CopyToOutputDirectory)')" />
+      <_AnoMechInputLine Include="tool-root|$(MSBuildSDKsPath)" Condition="'$(MSBuildSDKsPath)' != ''" />
+      <_AnoMechInputLine Include="tool-root|$(MSBuildToolsPath)" Condition="'$(MSBuildToolsPath)' != ''" />
+      <_AnoMechInputLine Include="tool-root|$(RoslynTargetsPath)" Condition="'$(RoslynTargetsPath)' != ''" />
+      <_AnoMechInputLine Include="tool-root|$(CscToolPath)" Condition="'$(CscToolPath)' != ''" />
+      <_AnoMechInputLine Include="tool|$([System.IO.Path]::Combine('$(CscToolPath)', '$(CscToolExe)'))"
+                         Condition="'$(CscToolPath)' != '' And '$(CscToolExe)' != ''" />
+      <_AnoMechInputLine Include="tool|$(DPTaskAssembly)" />
+    </ItemGroup>
+    <ItemGroup>
+      <_AnoMechHashInput Include="@(_AnoMechImport)">
+        <_AnoMechCategory>import</_AnoMechCategory>
+        <_AnoMechMeta />
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(Compile)">
+        <_AnoMechCategory>compile</_AnoMechCategory>
+        <_AnoMechMeta>%(Compile.Link)</_AnoMechMeta>
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(ReferencePath)">
+        <_AnoMechCategory>reference</_AnoMechCategory>
+        <_AnoMechMeta>%(Filename)%(Extension)</_AnoMechMeta>
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(ReferencePathWithRefAssemblies)">
+        <_AnoMechCategory>reference-ref</_AnoMechCategory>
+        <_AnoMechMeta>%(Filename)%(Extension)</_AnoMechMeta>
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(Analyzer)">
+        <_AnoMechCategory>analyzer</_AnoMechCategory>
+        <_AnoMechMeta>%(Analyzer.OutputItemType)|%(Analyzer.TreatAsPackageReference)</_AnoMechMeta>
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(AdditionalFiles)">
+        <_AnoMechCategory>additional</_AnoMechCategory>
+        <_AnoMechMeta />
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(EditorConfigFiles)">
+        <_AnoMechCategory>editorconfig</_AnoMechCategory>
+        <_AnoMechMeta />
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(EmbeddedResource)">
+        <_AnoMechCategory>embedded-resource</_AnoMechCategory>
+        <_AnoMechMeta>%(EmbeddedResource.ManifestResourceName)</_AnoMechMeta>
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(Resource)">
+        <_AnoMechCategory>resource</_AnoMechCategory>
+        <_AnoMechMeta />
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(Content)">
+        <_AnoMechCategory>content</_AnoMechCategory>
+        <_AnoMechMeta>%(Content.CopyToOutputDirectory)</_AnoMechMeta>
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="@(None)">
+        <_AnoMechCategory>none</_AnoMechCategory>
+        <_AnoMechMeta>%(None.CopyToOutputDirectory)</_AnoMechMeta>
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="$([System.IO.Path]::Combine('$(CscToolPath)', '$(CscToolExe)'))"
+                         Condition="'$(CscToolPath)' != '' And '$(CscToolExe)' != ''">
+        <_AnoMechCategory>tool</_AnoMechCategory>
+        <_AnoMechMeta />
+      </_AnoMechHashInput>
+      <_AnoMechHashInput Include="$(DPTaskAssembly)">
+        <_AnoMechCategory>tool</_AnoMechCategory>
+        <_AnoMechMeta />
+      </_AnoMechHashInput>
+    </ItemGroup>
+    <GetFileHash Files="@(_AnoMechHashInput)"
+                 Algorithm="SHA256"
+                 HashEncoding="hex"
+                 MetadataName="AnoMechObservedHash">
+      <Output TaskParameter="Items" ItemName="_AnoMechBeforeHash" />
+    </GetFileHash>
+    <ItemGroup>
+      <_AnoMechObservedInputLine Include="@(_AnoMechBeforeHash->'observed|%(_AnoMechCategory)|%(FullPath)|%(AnoMechObservedHash)|%(_AnoMechMeta)')" />
+    </ItemGroup>
+    <ItemGroup>
+      <_AnoMechStableInputLine Include="@(_AnoMechInputLine)" />
+      <_AnoMechBeforeManifestLine Include="@(_AnoMechStableInputLine)" />
+      <_AnoMechBeforeManifestLine Include="@(_AnoMechObservedInputLine)" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(AnoMechBuildInputManifest).before"
+                      Lines="@(_AnoMechBeforeManifestLine)" Overwrite="true" />
+  </Target>
+  <!-- After CoreCompile, source generators have emitted their actual *.cs
+       files and CscCommandLineArgs contains the command line produced by the
+       SDK Csc task. The producer hashes these records outside MSBuild. -->
+  <Target Name="CaptureAnoMechBuildInputs" AfterTargets="CoreCompile" Condition="'$(AnoMechBuildPairId)' != ''">
+    <ItemGroup>
+      <_AnoMechInputLine Remove="@(_AnoMechInputLine)" />
+      <_AnoMechInputLine Include="@(_AnoMechStableInputLine)" />
+      <_AnoMechGeneratedSource Include="$(CompilerGeneratedFilesOutputPath)\**\*.cs" />
+      <_AnoMechInputLine Include="@(_AnoMechGeneratedSource->'generated|%(FullPath)')" />
+      <_AnoMechInputLine Include="@(CscCommandLineArgs->'compiler-arg|%(Identity)')" />
+      <_AnoMechGeneratedHashInput Include="@(_AnoMechGeneratedSource)">
+        <_AnoMechCategory>generated</_AnoMechCategory>
+        <_AnoMechMeta />
+      </_AnoMechGeneratedHashInput>
+    </ItemGroup>
+    <GetFileHash Files="@(_AnoMechHashInput);@(_AnoMechGeneratedHashInput)"
+                 Algorithm="SHA256"
+                 HashEncoding="hex"
+                 MetadataName="AnoMechObservedHash">
+      <Output TaskParameter="Items" ItemName="_AnoMechAfterHash" />
+    </GetFileHash>
+    <ItemGroup>
+      <_AnoMechAfterManifestLine Include="@(_AnoMechInputLine)" />
+      <_AnoMechAfterObservedInputLine Include="@(_AnoMechAfterHash->'observed|%(_AnoMechCategory)|%(FullPath)|%(AnoMechObservedHash)|%(_AnoMechMeta)')" />
+      <_AnoMechAfterManifestLine Include="@(_AnoMechAfterObservedInputLine)" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(AnoMechBuildInputManifest).after"
+                      Lines="@(_AnoMechAfterManifestLine)" Overwrite="true" />
+  </Target>
+
+  <ItemGroup>
+    <Compile Remove="**\bin\**\*.cs" />
+    <Compile Remove="**\obj\**\*.cs" />
+
+
+    <Compile Include="..\Relay\AnoMech.TcRelay\RelayServer.cs" Link="Multiplayer\RelayServer.cs" />
+  </ItemGroup>
+  <!-- 這個檔案由 target 在每次編譯前產生；普通 build 的內容固定為空 pair，
+       且路徑會因 edition／Configuration 隔離，不會讀到舊配對 generated source。 -->
+  <ItemGroup>
+    <Compile Include="$(AnoMechBuildIdentitySource)" AutoGen="true" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.20" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 僅保留核准資料入口；不可因安裝目錄殘留或新檔名自動出貨。 -->
+    <None Remove="Data\*.json" />
+    <None Include="AnoMech.json" />
+    <EmbeddedResource Include="Data\recorded_abilities.json" LogicalName="AnoMech.Data.recorded_abilities.json" />
+  </ItemGroup>
+</Project>

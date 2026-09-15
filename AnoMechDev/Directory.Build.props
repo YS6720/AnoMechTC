@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AnoMech 專用建置輪廓。
+
+     這裡只負責在 SDK 建立 default items 前釘死版本、輸出及中繼目錄；
+     產物路徑可以由受控的 producer 以命令列明確覆寫。 -->
+<Project>
+
+  <PropertyGroup>
+    <!-- 這個 repo 的建置組態固定，不接受外部覆寫。 -->
+    <AnoMechEdition Condition="'$(AnoMechEdition)' == ''">User</AnoMechEdition>
+    <!-- AnoMechDev 不繼承 repo root 的通用 props；固定與既有 plugin profile
+         相同的 TFM／platform 輸出形狀，避免 SDK 自行再加一層目錄。 -->
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Platforms>x64</Platforms>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendPlatformToOutputPath>false</AppendPlatformToOutputPath>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <PreserveCompilationContext>false</PreserveCompilationContext>
+    <NoWarn>$(NoWarn);CS1591;MSB3277</NoWarn>
+
+    <!-- 每個版別／Configuration 都有自己的 bin、obj、project extensions。 -->
+    <AnoMechBuildRoot Condition="'$(AnoMechBuildRoot)' == ''">$(MSBuildThisFileDirectory)</AnoMechBuildRoot>
+    <AnoMechOutputPath Condition="'$(AnoMechOutputPath)' == ''">$(AnoMechBuildRoot)bin\$(AnoMechEdition)\$(Configuration)\</AnoMechOutputPath>
+    <AnoMechIntermediatePath Condition="'$(AnoMechIntermediatePath)' == ''">$(AnoMechBuildRoot)obj\$(AnoMechEdition)\$(Configuration)\</AnoMechIntermediatePath>
+    <AnoMechExtensionsPath Condition="'$(AnoMechExtensionsPath)' == ''">$(AnoMechIntermediatePath)projectextensions\</AnoMechExtensionsPath>
+    <AnoMechBaseOutputPath Condition="'$(AnoMechBaseOutputPath)' == ''">$(AnoMechBuildRoot)bin\$(AnoMechEdition)\</AnoMechBaseOutputPath>
+    <BaseOutputPath>$(AnoMechBaseOutputPath)</BaseOutputPath>
+    <!-- 這三個是 SDK props／NuGet 使用的實際 early profile，不等到 csproj body
+         才切換，避免另一版的 project.assets／generated props 先被匯入。 -->
+    <BaseIntermediateOutputPath>$(AnoMechIntermediatePath)</BaseIntermediateOutputPath>
+    <IntermediateOutputPath>$(AnoMechIntermediatePath)</IntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(AnoMechExtensionsPath)</MSBuildProjectExtensionsPath>
+
+    <!-- PairId 只接受 producer 顯式傳入；普通 build 永遠是空值。 -->
+    <AnoMechBuildPairId Condition="'$(AnoMechBuildPairId)' == ''"></AnoMechBuildPairId>
+    <AnoMechBuildIdentitySource Condition="'$(AnoMechBuildPairId)' == '' And '$(AnoMechBuildIdentitySource)' == ''">$(AnoMechIntermediatePath)AnoMechBuildIdentity.none.g.cs</AnoMechBuildIdentitySource>
+    <AnoMechBuildIdentitySource Condition="'$(AnoMechBuildPairId)' != '' And '$(AnoMechBuildIdentitySource)' == ''">$(AnoMechIntermediatePath)AnoMechBuildIdentity.$(AnoMechBuildPairId).g.cs</AnoMechBuildIdentitySource>
+    <AnoMechBuildInputManifest Condition="'$(AnoMechBuildInputManifest)' == ''">$(AnoMechIntermediatePath)AnoMechBuildInputs.txt</AnoMechBuildInputManifest>
+
+    <!-- Csc must expose its real command line; generated-source output is
+         always inside this edition's isolated obj tree. -->
+    <ProvideCommandLineArgs>true</ProvideCommandLineArgs>
+    <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+    <CompilerGeneratedFilesOutputPath Condition="'$(CompilerGeneratedFilesOutputPath)' == ''">$(AnoMechIntermediatePath)generated</CompilerGeneratedFilesOutputPath>
+
+    <!-- 避免 SDK default glob 從另一版／舊版目錄把中繼檔當 Compile。 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildThisFileDirectory)**\bin\**;$(MSBuildThisFileDirectory)**\obj\**;$(MSBuildThisFileDirectory)artifacts\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <Target Name="ValidateAnoMechBuildProfile" BeforeTargets="Restore;PrepareForBuild">
+    <Error Condition="'$(AnoMechEdition)' != 'User'"
+           Text="建置組態不可覆寫；實際值：$(AnoMechEdition)" />
+    <Error Condition="'$(Configuration)' == 'Release' And $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|;)DEBUG(;|$)'))"
+           Text="AnoMech Release 禁止含 DEBUG；請移除 DEBUG 或改用 Debug Configuration。" />
+    <Error Condition="'$(AnoMechEdition)' == 'User' And $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|;)ANOMECH_DEVTOOLS(;|$)'))"
+           Text="此組態禁止定義 ANOMECH_DEVTOOLS。" />
+    <Error Condition="'$(EmitCompilerGeneratedFiles)' != 'true'"
+           Text="AnoMech 必須輸出 source-generator generated *.cs，禁止關閉 EmitCompilerGeneratedFiles。" />
+    <Error Condition="'$(CompilerGeneratedFilesOutputPath)' != '$(AnoMechIntermediatePath)generated'"
+           Text="source-generator 輸出必須隔離在目前版別 obj\\generated；實際值：$(CompilerGeneratedFilesOutputPath)" />
+    <Error Condition="'$(AnoMechBuildPairId)' != '' And !$([System.Text.RegularExpressions.Regex]::IsMatch('$(AnoMechBuildPairId)', '^[0-9a-f]{64}$'))"
+           Text="AnoMechBuildPairId 必須是 64 位小寫十六進位 pair id；畸形配對建置拒絕。" />
+    <Error Condition="'$(AnoMechBuildPairId)' == '' And '$(AnoMechBuildIdentitySource)' != '$(AnoMechIntermediatePath)AnoMechBuildIdentity.none.g.cs'"
+           Text="普通 AnoMech build 禁止指定配對 generated source；請清除舊的 AnoMechBuildIdentitySource。" />
+    <Error Condition="'$(AnoMechBuildPairId)' != '' And '$(AnoMechBuildIdentitySource)' != '$(AnoMechIntermediatePath)AnoMechBuildIdentity.$(AnoMechBuildPairId).g.cs'"
+           Text="配對 generated source 必須由目前的 64 位 pair id 產生；拒絕外部替換。" />
+  </Target>
+
+  <!-- 釘死台服 Dalamud 來源。SDK props 在 Windows 上會覆寫 DalamudLibPath，
+       DALAMUD_HOME 是官方保留且排在該覆寫之後的入口。 -->
+  <PropertyGroup Condition="'$(DALAMUD_HOME)' == ''">
+    <DALAMUD_HOME>$(APPDATA)\FFXIVSimpleLauncher\Dalamud\Injector</DALAMUD_HOME>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <DalamudLibPath Condition="'$(DALAMUD_HOME)' == ''">$(appdata)\FFXIVSimpleLauncher\Dalamud\Injector\</DalamudLibPath>
+    <DalamudLibPath Condition="'$(DALAMUD_HOME)' != ''">$(DALAMUD_HOME)\</DalamudLibPath>
+  </PropertyGroup>
+
+</Project>

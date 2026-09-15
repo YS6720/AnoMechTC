@@ -1,0 +1,35 @@
+<Project>
+  <PropertyGroup>
+    <ImportDirectoryBuildProps>false</ImportDirectoryBuildProps>
+    <ImportDirectoryBuildTargets>false</ImportDirectoryBuildTargets>
+  </PropertyGroup>
+
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>AnoMech.Relay</RootNamespace>
+    <AssemblyName>AnoMech.TcRelay</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\AnoMech\Multiplayer\Protocol.cs" Link="Shared\Protocol.cs" />
+    <Compile Include="..\..\AnoMech\Multiplayer\MpValidation.cs" Link="Shared\MpValidation.cs" />
+    <Compile Include="..\..\AnoMech\Multiplayer\WireProtocol.cs" Link="Shared\WireProtocol.cs" />
+    <Compile Include="..\..\AnoMech\Multiplayer\WorldProtocol.cs" Link="Shared\WorldProtocol.cs" />
+    <Compile Include="..\..\AnoMech\Multiplayer\WorldValidation.cs" Link="Shared\WorldValidation.cs" />
+    <Compile Include="..\..\AnoMech\Multiplayer\MultiplayerContracts.cs" Link="Shared\MultiplayerContracts.cs" />
+    <Compile Include="..\..\AnoMech\Multiplayer\HostGrants.cs" Link="Shared\HostGrants.cs" />
+    <Compile Include="..\..\AnoMech\Multiplayer\HostInvitation.cs" Link="Shared\HostInvitation.cs" />
+    <Compile Include="..\..\AnoMech\Multiplayer\RoomInvitation.cs" Link="Shared\RoomInvitation.cs" />
+    <Compile Include="..\..\AnoMech\Core\Game\Party\PartyRole.cs" Link="Shared\PartyRole.cs" />
+    <Compile Include="..\..\AnoMech\Core\Sign.cs" Link="Shared\Sign.cs" />
+  </ItemGroup>
+
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>

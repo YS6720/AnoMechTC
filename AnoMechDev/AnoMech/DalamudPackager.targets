@@ -1,0 +1,18 @@
+<Project>
+  <!-- DalamudPackager opens its manifest exclusively. Give each edition and
+       configuration its own copy; never let concurrent builds share that handle. -->
+  <Target Name="PackageAnoMechIsolated" AfterTargets="Build">
+    <PropertyGroup>
+      <_AnoMechPackagerProjectDir>$(AnoMechIntermediatePath)packager\</_AnoMechPackagerProjectDir>
+      <_AnoMechMakeZip Condition="'$(Configuration)' == 'Release'">true</_AnoMechMakeZip>
+      <_AnoMechMakeZip Condition="'$(Configuration)' != 'Release'">false</_AnoMechMakeZip>
+    </PropertyGroup>
+    <MakeDir Directories="$(_AnoMechPackagerProjectDir)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\$(AssemblyName).json"
+          DestinationFolder="$(_AnoMechPackagerProjectDir)" />
+    <DalamudPackager ProjectDir="$(_AnoMechPackagerProjectDir)"
+                    OutputPath="$(OutputPath)"
+                    AssemblyName="$(AssemblyName)"
+                    MakeZip="$(_AnoMechMakeZip)" />
+  </Target>
+</Project>
