@@ -5,7 +5,7 @@
 
   <PropertyGroup>
     <Authors>Anomek（上游）; anomech-tc 台服移植</Authors>
-    <Version>0.20.0.1</Version>
+    <Version>0.20.0.2</Version>
     <Description>Simulate ultimate raid mechanics locally or with a self-hosted TC relay</Description>
     <RootNamespace>AnoMech</RootNamespace>
     <PackageProjectUrl>https://github.com/anomek/AnoMech</PackageProjectUrl>

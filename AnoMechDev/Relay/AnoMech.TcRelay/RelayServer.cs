@@ -663,6 +663,17 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
         }
     }
 
+    /// <summary>
+    /// 踢掉連線並記下原因。斷線對使用者是同一個結果，但成因完全不同——限流、
+    /// 序號倒退、封包格式、應用層拒絕各有各的修法。不記原因就只能猜。
+    /// 只記分類字串，不記封包內容。
+    /// </summary>
+    private void AbortWithReason(PeerConnection connection, string reason)
+    {
+        Log($"peer dropped  reason={reason}  peer={Short(connection.PeerId.ToString("N"))}");
+        connection.Socket.Abort();
+    }
+
     private async Task RunReceiveLoopAsync(PeerConnection connection)
     {
         while (!connection.Lifetime.IsCancellationRequested && connection.Socket.State == WebSocketState.Open)
@@ -678,29 +689,32 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
 
             if (frameType == WireProtocol.ControlKind)
             {
-                if (!WireProtocol.TryDecodeControl(received.Bytes, out var control) ||
-                    control.Kind != RelayControlKind.Heartbeat ||
-                    control.Sequence <= connection.LastInboundSequence ||
-                    !AcceptRate(connection))
-                {
-                    connection.Socket.Abort();
-                    return;
-                }
+                // 這幾個條件以前混成同一個 Abort()，斷線後查不出是哪一個——
+                // 使用者只看到「斷線」。逐條分辨後記下原因（不含封包內容）。
+                if (!WireProtocol.TryDecodeControl(received.Bytes, out var control))
+                    { AbortWithReason(connection, "control-decode"); return; }
+                if (control.Kind != RelayControlKind.Heartbeat)
+                    { AbortWithReason(connection, "control-kind"); return; }
+                if (control.Sequence <= connection.LastInboundSequence)
+                    { AbortWithReason(connection, "control-sequence"); return; }
+                if (!AcceptRate(connection))
+                    { AbortWithReason(connection, "rate-limit"); return; }
                 connection.LastInboundSequence = control.Sequence;
                 Volatile.Write(ref connection.LastInboundTimestamp, Stopwatch.GetTimestamp());
                 EnqueueControl(connection, RelayControlKind.HeartbeatAck, Guid.Empty);
                 continue;
             }
 
-            if (frameType != WireProtocol.PacketKind ||
-                !WireProtocol.TryDecodeClientPacket(received.Bytes, out var packet) ||
-                packet.Sequence <= connection.LastInboundSequence ||
-                !AcceptRate(connection) ||
-                !AcceptApplicationPacket(connection, packet, out var forward))
-            {
-                connection.Socket.Abort();
-                return;
-            }
+            if (frameType != WireProtocol.PacketKind)
+                { AbortWithReason(connection, "frame-kind"); return; }
+            if (!WireProtocol.TryDecodeClientPacket(received.Bytes, out var packet))
+                { AbortWithReason(connection, "packet-decode"); return; }
+            if (packet.Sequence <= connection.LastInboundSequence)
+                { AbortWithReason(connection, "packet-sequence"); return; }
+            if (!AcceptRate(connection))
+                { AbortWithReason(connection, "rate-limit"); return; }
+            if (!AcceptApplicationPacket(connection, packet, out var forward))
+                { AbortWithReason(connection, "packet-rejected"); return; }
             connection.LastInboundSequence = packet.Sequence;
             Volatile.Write(ref connection.LastInboundTimestamp, Stopwatch.GetTimestamp());
             if (forward) ForwardApplicationPacket(connection, packet);

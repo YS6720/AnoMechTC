@@ -24,9 +24,15 @@ internal struct NetworkPoseSmoother
     // Follow the character cadence, not the slower complete-world snapshots.
     public const float SnapshotIntervalSeconds = 1f / MpLimits.PoseHz;
 
-    // Three samples cover a skipped arrival when packet and display clocks drift.
-    // Longer gaps still hold rather than extrapolate.
-    public const float InterpolationWindowSeconds = 3f * SnapshotIntervalSeconds;
+    // 視窗＝能容忍的到達抖動。原本 3 個取樣（25 ms）：只要連續三個 pose 晚到，
+    // 顯示就停住，玩家看到的是「別人偶爾頓一下」。經 Cloudflare Tunnel 的連線抖動
+    // 本來就比區網大，2026-09-15 維護者回報偶發嚴重卡頓。
+    //
+    // 放寬到 6 個取樣（50 ms）：抖動容忍加倍，代價是顯示固定落後 50 ms（跑動 6 m/s
+    // 約 0.3 m）。機制判定不受影響——判定讀最新的原始取樣，不是這裡的顯示值。
+    // 再往上加沒有意義：落後超過一個 GCD 的位置對練機制反而有害。
+    // 仍然不外插：晚到就停住，絕不猜未來位置（猜錯會橡皮筋，比頓一下更糟）。
+    public const float InterpolationWindowSeconds = 6f * SnapshotIntervalSeconds;
 
     // A 2 m jump in one character sample is not ordinary locomotion. Snap instead
     // of drawing a streak across the arena.
