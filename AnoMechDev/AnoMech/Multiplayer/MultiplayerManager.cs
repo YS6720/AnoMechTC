@@ -205,6 +205,13 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     private void ObserveSession()
     {
         if (Session == null) return;
+        if (Session.TakeRejection() is { } rejection)
+        {
+            var who = rejection.Role is { } role ? $"{rejection.Alias}({role})" : rejection.Alias;
+            var why = rejection.Detail is null ? rejection.Error.ToString() : $"{rejection.Error} {rejection.Detail}";
+            CrashTrace.Log($"[多人] 成員 {who} 拒絕開始：{why}");
+            ChatOutput.Error($"[多人同步] 成員「{who}」尚未就緒（{why}），本次開始已取消。");
+        }
         if (Session.LastError != MpError.None) Report(Session.LastError);
         if (Session.Phase != MultiplayerPhase.Closed || closedCleaned) return;
         // This also retires the owned relay/tunnel when the host socket closes.
@@ -308,6 +315,16 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     bool IMultiplayerGame.Paused { get => game.Paused; set => game.Paused = value; }
     bool IMultiplayerGame.IsPrepared => game.NetworkIsPrepared;
     bool IMultiplayerGame.IsRestoring => game.NetworkIsRestoring;
+
+    // Mirrors the Busy gate in CheckRun, in the same order, as a wire-safe tag.
+    public string BusyDetail()
+    {
+        if (game.NetworkIsRestoring)
+            return game.World.Map.Session.HasRestoreFailed ? "zone-restore-failed" : "zone-restoring";
+        if (!ZoneSession.IsInInn())
+            return $"not-in-inn:{Plugin.ClientState.TerritoryType}";
+        return ZoneSession.DescribePlayerBusy() is { } flag ? $"player-busy:{flag}" : "none";
+    }
 
     public MpError CheckRun(RunDescriptor descriptor)
     {

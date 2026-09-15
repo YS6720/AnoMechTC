@@ -170,14 +170,16 @@ public class TopP5OmegaAi : IScenarioAi<TopP5OmegaState>
     protected virtual RoleList solveHelloWorld1(SimParty party)
     {
         var monitorTarget = monitorTargets();
-        var jumpTargets = RoleList.AllExcept(party, monitorTarget[0], monitorTarget[1], state.HelloWorldTargets[0],
-                                             state.HelloWorldTargets[1]);
-        return new RoleList(party,
-            [
-                state.HelloWorldTargets[0], state.HelloWorldTargets[1], monitorTarget[0], monitorTarget[1],
-                jumpTargets[0], jumpTargets[1], jumpTargets[2], jumpTargets[3]
-            ]
-        );
+        var jumpTargets = RoleList.AllExcept(party, monitorTarget.ElementAtOrDefault(0),
+                                             monitorTarget.ElementAtOrDefault(1),
+                                             state.HelloWorldTargets[0], state.HelloWorldTargets[1]);
+        // 監視器可能湊不到兩人（玩家漏接／死亡），缺口由 Assign 從剩下的人補滿 8 格。
+        return new RoleList(party, TopP5OmegaRoleRules.Assign(
+            fixedSlots: [state.HelloWorldTargets[0], state.HelloWorldTargets[1]],
+            preferred: monitorTarget,
+            preferredCount: 2,
+            fallback: jumpTargets.List,
+            everyone: [.. Enum.GetValues<PartyRole>()]));
     }
 
     protected virtual RoleList solveHelloWorld2(SimParty party)
@@ -188,20 +190,19 @@ public class TopP5OmegaAi : IScenarioAi<TopP5OmegaState>
         {
            if  (role == state.HelloWorldTargets[2] || role == state.HelloWorldTargets[3])
                continue;
+           // 第 3 層要玩家實際接到才有：打得不完美時這個名單就湊不到兩人。
            if (party.Get(role)?.FindStatus(TopConstants.StatusId.QuickeningDynamis) is { Stacks: 3 })
                tethers.Add(role);
            else
                freeAgents.Add(role);
         }
-        freeAgents = freeAgents.Shuffle().ToList();
-        tethers = tethers.Shuffle().ToList();
-        return new RoleList(party,
-            [
-                state.HelloWorldTargets[2], state.HelloWorldTargets[3], tethers[0], tethers[1],
-                freeAgents[0], freeAgents[1], freeAgents[2], freeAgents[3]
-            ]);
+        return new RoleList(party, TopP5OmegaRoleRules.Assign(
+            fixedSlots: [state.HelloWorldTargets[2], state.HelloWorldTargets[3]],
+            preferred: [.. tethers.Shuffle()],
+            preferredCount: 2,
+            fallback: [.. freeAgents.Shuffle()],
+            everyone: [.. Enum.GetValues<PartyRole>()]));
     }
-
 
     private List<PartyRole> monitorTargets()
     {
@@ -220,13 +221,8 @@ public class TopP5OmegaAi : IScenarioAi<TopP5OmegaState>
                 canTakeMonitor.Add(role);
         }
 
-        while (mustTakeMonitor.Count < 2)
-        {
-            var selected = canTakeMonitor[rng.Next(canTakeMonitor.Count)];
-            canTakeMonitor.Remove(selected);
-            mustTakeMonitor.Add(selected);
-        }
-
-        return mustTakeMonitor.Shuffle().ToList();
+        return [.. TopP5OmegaRoleRules
+            .Monitors([.. mustTakeMonitor.Shuffle()], [.. canTakeMonitor.Shuffle()])
+            .Shuffle()];
     }
 }

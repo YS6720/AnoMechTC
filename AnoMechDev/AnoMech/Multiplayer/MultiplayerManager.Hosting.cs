@@ -145,7 +145,8 @@ internal sealed partial class MultiplayerManager
         catch (IOException) { throw new HostingException(HostingError.InvalidConfiguration); }
         catch (ArgumentException) { throw new HostingException(HostingError.InvalidConfiguration); }
         catch (JsonException) { throw new HostingException(HostingError.InvalidConfiguration); }
-        return await HostedRelay.StartAsync(options, token).ConfigureAwait(false);
+        return await HostedRelay.StartAsync(options, token,
+            line => Core.CrashTrace.Log($"[relay] {line}")).ConfigureAwait(false);
     }
 
     private void ConnectTransport(RelayConnectionOptions options)

@@ -213,34 +213,35 @@ public sealed unsafe class ZoneSession : IDisposable
     // Any state in which the local player can't freely act. Used as a second
     // gate before starting a scenario from an inn so we don't kick off mid-
     // cutscene, mid-NPC-event, mid-craft, mid-zone, etc.
+    private static readonly ConditionFlag[] BusyFlags =
+    [
+        ConditionFlag.WatchingCutscene, ConditionFlag.WatchingCutscene78,
+        ConditionFlag.OccupiedInCutSceneEvent, ConditionFlag.OccupiedInEvent,
+        ConditionFlag.OccupiedInQuestEvent, ConditionFlag.OccupiedSummoningBell,
+        ConditionFlag.Occupied30, ConditionFlag.Occupied33, ConditionFlag.Occupied38, ConditionFlag.Occupied39,
+        ConditionFlag.Crafting, ConditionFlag.ExecutingCraftingAction, ConditionFlag.PreparingToCraft,
+        ConditionFlag.Gathering, ConditionFlag.ExecutingGatheringAction, ConditionFlag.Fishing,
+        ConditionFlag.TradeOpen, ConditionFlag.BetweenAreas, ConditionFlag.LoggingOut,
+        ConditionFlag.WaitingForDutyFinder, ConditionFlag.InDutyQueue, ConditionFlag.InCombat,
+        ConditionFlag.Mounted, ConditionFlag.Jumping, ConditionFlag.Occupied,
+    ];
+
     public static bool IsPlayerBusy()
     {
         var c = Plugin.Condition;
-        return c[ConditionFlag.WatchingCutscene]
-            || c[ConditionFlag.WatchingCutscene78]
-            || c[ConditionFlag.OccupiedInCutSceneEvent]
-            || c[ConditionFlag.OccupiedInEvent]
-            || c[ConditionFlag.OccupiedInQuestEvent]
-            || c[ConditionFlag.OccupiedSummoningBell]
-            || c[ConditionFlag.Occupied30]
-            || c[ConditionFlag.Occupied33]
-            || c[ConditionFlag.Occupied38]
-            || c[ConditionFlag.Occupied39]
-            || c[ConditionFlag.Crafting]
-            || c[ConditionFlag.ExecutingCraftingAction]
-            || c[ConditionFlag.PreparingToCraft]
-            || c[ConditionFlag.Gathering]
-            || c[ConditionFlag.ExecutingGatheringAction]
-            || c[ConditionFlag.Fishing]
-            || c[ConditionFlag.TradeOpen]
-            || c[ConditionFlag.BetweenAreas]
-            || c[ConditionFlag.LoggingOut]
-            || c[ConditionFlag.WaitingForDutyFinder]
-            || c[ConditionFlag.InDutyQueue]
-            || c[ConditionFlag.InCombat]
-            || c[ConditionFlag.Mounted]
-            || c[ConditionFlag.Jumping]
-            || c[ConditionFlag.Occupied];
+        foreach (var flag in BusyFlags)
+            if (c[flag]) return true;
+        return false;
+    }
+
+    // First busy flag by name, or null: the multiplayer host gets this instead of a
+    // bare Busy so "someone is mounted" and "someone is mid-cutscene" stop looking alike.
+    public static string? DescribePlayerBusy()
+    {
+        var c = Plugin.Condition;
+        foreach (var flag in BusyFlags)
+            if (c[flag]) return flag.ToString();
+        return null;
     }
 
     // Load the target territory, teleport player to playerSpawn, enable firewall.

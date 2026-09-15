@@ -119,8 +119,12 @@ public sealed class HostedRelay : IAsyncDisposable
         }
     }
 
+    // activityLog: room lifecycle and drop reasons from the embedded relay. Optional so the
+    // smoke harness (which links this file without the plugin's trace) stays silent; the
+    // plugin passes its trace so a local host can finally see why a member was dropped.
     public static async Task<HostedRelay> StartAsync(
-        HostedRelayOptions options, CancellationToken cancellationToken = default)
+        HostedRelayOptions options, CancellationToken cancellationToken = default,
+        Action<string>? activityLog = null)
     {
         ValidateOptions(options, out var publicEndpoint);
         cancellationToken.ThrowIfCancellationRequested();
@@ -144,6 +148,11 @@ public sealed class HostedRelay : IAsyncDisposable
                 Port = options.Port,
                 MaxRooms = 1,
                 HostGrantSource = grants,
+                // 本機開房的 relay 原本完全沉默，所以「成員突然被踢」在本機模式下
+                // 查不到任何原因——2026-09-16 連續數次都只看得到 PeerDisconnected，
+                // 分不出是 liveness 逾時、限流、序號倒退還是應用層拒絕。內容只有
+                // 房號、原因分類與 peer 前綴，不含 token、邀請全文或玩家別名。
+                ActivityLog = activityLog,
             });
             // Start binds the listener and completes its first grant read before returning; the
             // deadline token owns only the asynchronous tunnel/probe phase, so a successful host

@@ -39,6 +39,20 @@ public static class MpValidation
         return true;
     }
 
+    // Diagnostic tag on CheckedRun: absent, or a short ASCII token list. It is
+    // rendered into the host's chat verbatim, so the alphabet is deliberately
+    // narrow (no whitespace, no markup) and the length small.
+    public static bool Detail(string? value)
+    {
+        if (value is null) return true;
+        if (value.Length is 0 or > MpLimits.DetailLength) return false;
+        foreach (var c in value)
+            if (c is not (>= 'a' and <= 'z') and not (>= 'A' and <= 'Z') and
+                not (>= '0' and <= '9') and not ('-' or '_' or ':' or ',' or '='))
+                return false;
+        return true;
+    }
+
     // An alias is rendered into the engine's 64-byte fixed name buffer (NUL included),
     // so it must encode to at most 63 UTF-8 bytes. Rejecting is the only correct answer:
     // truncating a multi-byte name produces a corrupt name, not a shortened one. The
@@ -101,7 +115,7 @@ public static class MpValidation
         ClaimRoleMessage claim => Role(claim.Role),
         RejectedMessage rejected => rejected.RecipientId != Guid.Empty && Error(rejected.Error) && rejected.Error != MpError.None,
         CheckRunMessage check => Descriptor(check.Descriptor),
-        CheckedRunMessage check => Error(check.Error),
+        CheckedRunMessage check => Error(check.Error) && Detail(check.Detail),
         PreparedRunMessage prepared => Error(prepared.Error),
         PrepareRunMessage or CommitRunMessage or PauseMessage => true,
         EndRunMessage end => Error(end.Reason),

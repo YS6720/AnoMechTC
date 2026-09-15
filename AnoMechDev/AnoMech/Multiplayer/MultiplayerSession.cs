@@ -52,6 +52,23 @@ public sealed class MultiplayerSession : IDisposable
     public bool Paused => game.Paused;
     public event Action<Exception>? Faulted;
 
+    // The member whose CheckRun/PrepareRun answer ended the host's start, kept for the
+    // manager to surface once; LastError alone says "Busy" without who or why.
+    private MemberRejection? pendingRejection;
+
+    public MemberRejection? TakeRejection()
+    {
+        var rejection = pendingRejection;
+        pendingRejection = null;
+        return rejection;
+    }
+
+    private void RecordRejection(Guid peerId, MpError error, string? detail)
+    {
+        var member = members.TryGetValue(peerId, out var found) ? found : null;
+        pendingRejection = new MemberRejection(member?.Alias ?? peerId.ToString("N")[..8], member?.Role, error, detail);
+    }
+
     public void BeforeGameTick(double now)
     {
         if (disposed)
@@ -338,7 +355,12 @@ public sealed class MultiplayerSession : IDisposable
                 BeginScope(packet.RunId, check.Descriptor, now);
                 var checkError = restoring ? MpError.Busy :
                     members.Values.Any(m => m.Role == null) ? MpError.RoleRequired : game.CheckRun(check.Descriptor);
-                Send(packet.RunId, new CheckedRunMessage(checkError));
+                // The host only ever saw a bare "Busy"; say which gate closed so the
+                // host can tell "someone is still restoring" from "someone left the inn".
+                var detail = checkError != MpError.Busy ? null
+                    : Phase == MultiplayerPhase.Restoring ? "phase-restoring"
+                    : game.BusyDetail();
+                Send(packet.RunId, new CheckedRunMessage(checkError, MpValidation.Detail(detail) ? detail : null));
                 if (checkError != MpError.None)
                     FinishLocal(false, checkError);
                 return;
@@ -355,7 +377,7 @@ public sealed class MultiplayerSession : IDisposable
             case CheckedRunMessage checkedRun when IsHost && Phase == MultiplayerPhase.Checking:
                 RequireMember(packet.SenderId);
                 if (checkedRun.Error != MpError.None)
-                { EndAsHost(false, checkedRun.Error); return; }
+                { RecordRejection(packet.SenderId, checkedRun.Error, checkedRun.Detail); EndAsHost(false, checkedRun.Error); return; }
                 checkedPeers.Add(packet.SenderId);
                 if (checkedPeers.Count == members.Count)
                     PrepareLocal(now);
@@ -366,7 +388,7 @@ public sealed class MultiplayerSession : IDisposable
             case PreparedRunMessage prepared when IsHost && Phase == MultiplayerPhase.Preparing && prepareSent:
                 RequireMember(packet.SenderId);
                 if (prepared.Error != MpError.None)
-                { EndAsHost(true, prepared.Error); return; }
+                { RecordRejection(packet.SenderId, prepared.Error, null); EndAsHost(true, prepared.Error); return; }
                 preparedPeers.Add(packet.SenderId);
                 TryCommit();
                 break;

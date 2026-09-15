@@ -39,6 +39,7 @@ public static class MpLimits
     public const int Streak = 100_000;
     public const float RetryDisplaySeconds = 600f;
     public const float CoordinateLimit = 4096f;
+    public const int DetailLength = 64;
     public const double HeartbeatSeconds = 2;
     // 心跳每 2 秒一次，所以這是「連續漏幾次才判死」。8 秒（漏 4 次）對實際網路抖動太緊，
     // 維護者 回報最痛的是房主自己被踢、整房要重開重連；房主送 ~140/s（120 role/self ＋
@@ -73,6 +74,8 @@ public readonly record struct MpQuaternion(float X, float Y, float Z, float W)
 public readonly record struct MpPose(MpVector Position, float Rotation);
 public readonly record struct RunScope(Guid RoomId, Guid RunId, long Generation);
 public sealed record LobbyMember(Guid PeerId, string Alias, PartyRole? Role, string BuildFingerprint);
+// Host-side only (never on the wire): which member's CheckRun/PrepareRun answer ended a start.
+public sealed record MemberRejection(string Alias, PartyRole? Role, MpError Error, string? Detail);
 public sealed record RunDescriptor(
     string SceneKey, string ProgressKey, string SceneFingerprint, string ResourceFingerprint,
     int AiIndex, int WaymarkIndex, float EventTimeScale, bool GodMode);
@@ -109,7 +112,7 @@ public sealed record LobbyMessage(LobbyMember[] Members) : MpMessage, IHostMessa
 public sealed record ClaimRoleMessage(PartyRole Role) : MpMessage, IPeerMessage;
 public sealed record RejectedMessage(Guid RecipientId, MpError Error) : MpMessage, IHostMessage;
 public sealed record CheckRunMessage(RunDescriptor Descriptor) : MpMessage, IHostMessage, IRunMessage;
-public sealed record CheckedRunMessage(MpError Error) : MpMessage, IPeerMessage, IRunMessage;
+public sealed record CheckedRunMessage(MpError Error, string? Detail = null) : MpMessage, IPeerMessage, IRunMessage;
 public sealed record PrepareRunMessage : MpMessage, IHostMessage, IRunMessage;
 public sealed record PreparedRunMessage(MpError Error) : MpMessage, IPeerMessage, IRunMessage;
 public sealed record CommitRunMessage : MpMessage, IHostMessage, IRunMessage;

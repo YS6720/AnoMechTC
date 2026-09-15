@@ -49,6 +49,10 @@ public interface IMultiplayerGame
     bool IsPrepared { get; }
     bool IsRestoring { get; }
     MpError CheckRun(RunDescriptor descriptor);
+    // Why CheckRun would answer Busy right now, as a short ASCII tag for the host's
+    // diagnostics ("zone-restoring", "not-in-inn:1122", "player-busy:OccupiedInEvent").
+    // A bare Busy on the host's screen names neither the member nor the gate.
+    string BusyDetail();
     MpError BeginPrepare(RunScope scope, RunDescriptor descriptor,
         IReadOnlyList<LobbyMember> roster, Guid localPeerId, bool host, Func<bool> isCurrent);
     MpError Commit(RunScope scope, bool host);

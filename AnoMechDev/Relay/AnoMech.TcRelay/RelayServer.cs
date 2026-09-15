@@ -683,7 +683,7 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
             if (received.MessageType != WebSocketMessageType.Text ||
                 !WireProtocol.TryGetFrameType(received.Bytes, out var frameType))
             {
-                connection.Socket.Abort();
+                AbortWithReason(connection, "frame-type");
                 return;
             }
 
@@ -864,6 +864,10 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
                     .ConfigureAwait(false);
             }
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AbortWithReason(connection, $"send-failed:{ex.GetType().Name}");
+        }
         catch
         {
             connection.Socket.Abort();
@@ -882,13 +886,17 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
             lock (roomsSync) currentRooms = rooms.Values.ToArray();
             foreach (var room in currentRooms)
             {
-                PeerConnection[] stale;
+                (PeerConnection Peer, double SilentSeconds)[] stale;
                 lock (room.Sync)
-                    stale = room.Members.Values.Where(peer =>
-                        Stopwatch.GetElapsedTime(Volatile.Read(ref peer.LastInboundTimestamp)).TotalSeconds >
-                        MpLimits.LivenessSeconds)
+                    stale = room.Members.Values
+                        .Select(peer => (Peer: peer,
+                            SilentSeconds: Stopwatch.GetElapsedTime(Volatile.Read(ref peer.LastInboundTimestamp)).TotalSeconds))
+                        .Where(entry => entry.SilentSeconds > MpLimits.LivenessSeconds)
                         .ToArray();
-                foreach (var peer in stale) peer.Socket.Abort();
+                // 這條是「成員突然被踢」最常見的路，以前完全不記——2026-09-16 本機開房
+                // 連續數次都只看得到 PeerDisconnected 就是因為它靜默。
+                foreach (var (peer, silent) in stale)
+                    AbortWithReason(peer, $"liveness silent={silent:F1}s");
             }
         }
     }
