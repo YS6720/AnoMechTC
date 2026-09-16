@@ -208,9 +208,8 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
         if (Session.TakeRejection() is { } rejection)
         {
             var who = rejection.Role is { } role ? $"{rejection.Alias}({role})" : rejection.Alias;
-            var why = rejection.Detail is null ? rejection.Error.ToString() : $"{rejection.Error} {rejection.Detail}";
-            CrashTrace.Log($"[多人] 成員 {who} 拒絕開始：{why}");
-            ChatOutput.Error($"[多人同步] 成員「{who}」尚未就緒（{why}），本次開始已取消。");
+            CrashTrace.Log($"[多人] 成員 {who} 拒絕開始：{rejection.Error} {rejection.Detail}");
+            ChatOutput.Error($"[多人同步] {DescribeRejection(who, rejection)}，本次開始已取消。");
         }
         if (Session.LastError != MpError.None) Report(Session.LastError);
         if (Session.Phase != MultiplayerPhase.Closed || closedCleaned) return;
@@ -220,6 +219,58 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
         DisconnectInternal();
         Report(error);
     }
+
+    // The wire detail is an internal tag ("not-in-inn:1122"); the host reads chat, not
+    // trace, so say what the member is actually doing and what fixes it. Maintainer
+    // 2026-09-16: a bare "not in room/inn" read as if the member had not joined the room.
+    private static string DescribeRejection(string who, MemberRejection rejection)
+    {
+        var detail = rejection.Detail ?? "";
+        var colon = detail.IndexOf(':');
+        var tag = colon < 0 ? detail : detail[..colon];
+        var arg = colon < 0 ? "" : detail[(colon + 1)..];
+        return rejection.Error switch
+        {
+            MpError.Busy => tag switch
+            {
+                "phase-restoring" or "zone-restoring" => $"成員「{who}」的場地還在還原中，請等幾秒再開始",
+                "zone-restore-failed" => $"成員「{who}」的場地還原失敗，請該成員輸入 /anomech leave 後再開始",
+                "not-in-inn" => $"成員「{who}」人不在旅館房間裡（目前在{PlaceName(arg)}），請該成員回到旅館房間再開始",
+                "player-busy" => $"成員「{who}」的角色正在{DescribeBusyFlag(arg)}，請該成員完成後再開始",
+                _ => $"成員「{who}」尚未就緒",
+            },
+            MpError.RoleRequired => $"成員「{who}」還沒選分工",
+            MpError.SceneMismatch or MpError.ResourceMismatch => $"成員「{who}」的副本資料與房主不一致（插件或遊戲版本不同）",
+            MpError.PrepareFailed or MpError.NativeFailure => $"成員「{who}」載入場地失敗",
+            _ => $"成員「{who}」拒絕開始（{rejection.Error}）",
+        };
+    }
+
+    private static string PlaceName(string territoryId)
+    {
+        if (!uint.TryParse(territoryId, out var id)) return "未知區域";
+        var row = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>()?.GetRowOrDefault(id);
+        var name = row?.PlaceName.ValueNullable?.Name.ExtractText();
+        return string.IsNullOrWhiteSpace(name) ? $"區域 {id}" : name;
+    }
+
+    private static string DescribeBusyFlag(string flag) => flag switch
+    {
+        "WatchingCutscene" or "WatchingCutscene78" or "OccupiedInCutSceneEvent" => "看過場動畫",
+        "OccupiedInEvent" or "OccupiedInQuestEvent" or "Occupied" or "Occupied30" or "Occupied33"
+            or "Occupied38" or "Occupied39" => "跟 NPC 或介面互動",
+        "OccupiedSummoningBell" => "使用僱員鈴",
+        "Crafting" or "ExecutingCraftingAction" or "PreparingToCraft" => "製作",
+        "Gathering" or "ExecutingGatheringAction" or "Fishing" => "採集",
+        "TradeOpen" => "交易",
+        "BetweenAreas" => "切換區域（載入中）",
+        "LoggingOut" => "登出",
+        "WaitingForDutyFinder" or "InDutyQueue" => "排任務搜尋器",
+        "InCombat" => "戰鬥",
+        "Mounted" => "騎乘坐騎",
+        "Jumping" => "跳躍",
+        _ => $"忙碌（{flag}）",
+    };
     private void TryStartPendingRetry()
     {
         if (pendingRetry is not { } pending) return;

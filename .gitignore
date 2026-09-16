@@ -3,3 +3,4 @@ obj/
 
 devloop.json
 tools/
+export-manifest.json
