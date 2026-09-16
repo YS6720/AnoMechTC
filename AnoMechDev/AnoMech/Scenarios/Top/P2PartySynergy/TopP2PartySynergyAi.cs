@@ -150,7 +150,9 @@ public class TopP2PartySynergyAi : IScenarioAi<TopP2PartySynergyState>
         Plugin.Log.Info($"Stack adjustments positions {pos0} {pos1}");
         if ((pos0 + pos1) % 2 == 0)
         {
-            if (pos0 > pos1)
+            // 同邊兩人都被點分攤時，由**較南（遠離眼球、index 較大）**的那位換到對面，
+            // 較北的照常跑。原本取較小 index（較北）換邊，維護者 2026-09-16 指出與實際打法相反。
+            if (pos0 < pos1)
                 pos0 = pos1;
             var partner = pos0 % 2 == 0 ? pos0 + 1 : pos0 - 1;
             if (state.Glitch == GlitchType.Far && pos0 is < 2 or > 5)
