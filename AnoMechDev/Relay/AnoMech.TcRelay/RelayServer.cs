@@ -844,8 +844,10 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
         var key = latest ? new StateKey(source.PeerId, packet.RunId, packet.Message.GetType()) : (StateKey?)null;
         foreach (var target in targets)
         {
+            // 送不出去＝這位成員讀得比房主送得慢，佇列在 liveness 內就滿了。以前只有
+            // Abort()，房主端看到的只是 PeerDisconnected；記下原因才分得出是網路還是主執行緒卡住。
             if (!target.Outbound.Enqueue(new RelayOutboundItem(bytes, latest, key)))
-                target.Socket.Abort();
+                AbortWithReason(target, "outbound-overflow:packet");
         }
 
     }
@@ -1042,7 +1044,7 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
                 ? new StateKey(Guid.Empty, Guid.Empty, typeof(RelayControlKind))
                 : (StateKey?)null;
             if (!target.Outbound.Enqueue(new RelayOutboundItem(bytes, kind == RelayControlKind.HeartbeatAck, key)))
-                target.Socket.Abort();
+                AbortWithReason(target, "outbound-overflow:control");
         }
     }
 

@@ -16,8 +16,14 @@ public static class MpLimits
     public const int Rooms = 4;
     public const int RunsPerRoom = 1024;
     public const int FrameBytes = 1024 * 1024;
-    public const int SendQueue = 128;
-    public const int ReceiveQueue = 256;
+    // 送出／接收佇列深度也由 liveness 推導，理由與下面 RelayIngressBurst 完全相同：
+    // 固定 128／256 時，房主送 ~140/s（PoseHz＋SnapshotHz），成員主執行緒只要卡 0.9～1.8 秒
+    // 佇列就滿——成員自己以 QueueOverflow 斷線、relay 也把送不出去的成員踢掉——
+    // 而 liveness 明明宣稱 12 秒沒訊息才算死。2026-09-16 實機三次「有人被踢」都落在
+    // 機制事件爆量的瞬間（事件會讓狀態合併失效），與這個 1.8 秒的窗完全吻合。
+    // 深度＝liveness 內會累積的訊息量；超過 liveness 心跳逾時本來就會斷，再大沒有意義。
+    public const int SendQueue = (int)(LivenessSeconds * (PoseHz + SnapshotHz));
+    public const int ReceiveQueue = SendQueue;
     public const int DrainPerTick = 32;
     public const int MessagesPerSenderSecond = 256;
     // 突發額度＝relay 願意容忍的靜默時間 × 單向送出頻率。這個數字**不可以自己挑**：
