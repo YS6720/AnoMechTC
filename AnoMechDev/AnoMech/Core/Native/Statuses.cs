@@ -177,16 +177,22 @@ internal static unsafe class Statuses
         }
 
         Apply(chara, statusId, refreshDuration, param, sourceObject);
-        if (isLocalPlayer)
-        {
-            // 同上：OnGainStatus 也是 sheet 驅動的「獲得狀態」處理，一樣會點亮
-            // StatusLoopVFX。玩家本人只要狀態本體（圖示與倒數），不要那個收不掉的特效。
-            return;
-        }
+        // 玩家本人：不走 AddStatus（登記不了、只留孤兒特效），但槽位寫好後仍要 OnGainStatus——
+        // 那是唯一實證會點亮 StatusLoopVFX 的路徑（9/15 翅膀就是它亮的）。9/16 兩條替代路
+        // 都實測不亮：SetStatus(refreshFlags: true)、直寫 CharacterData.StatusLoopVfxId。
+        // 特效現在綁在真實存在的狀態上；能否被 Remove 的 SetStatus(…, refreshFlags: true)
+        // 收掉，以維護者實機為準。
         for (int i = 0; i < slots.Length; i++)
         {
             if (slots[i].StatusId != statusId) continue;
             if (sourceObject is {} source && slots[i].SourceObject != source) continue;
+            // 直寫槽位跳過了 sheet 驅動的旗標計算；連段類判定（明鏡止水讓月光／花車／雪風亮）
+            // 看的是那些旗標而不是槽位本身——資料表裡這些戰技沒有 ActionProcStatus
+            // （2026-09-16 實測 proc=0），只有騎士贖罪劍那類才靠狀態發亮。
+            // SetStatus(refreshFlags: true) 是遊戲自己「改這一格並重算旗標」的函式（不點特效，
+            // 9/16 實測）；特效仍由下面的 OnGainStatus 點。
+            if (isLocalPlayer)
+                bc->StatusManager.SetStatus(i, statusId, slots[i].RemainingTime, slots[i].Param, slots[i].SourceObject, true);
             StatusManagerPointers.OnGainStatus(
                 &bc->StatusManager,
                 statusId,
@@ -194,7 +200,9 @@ internal static unsafe class Statuses
                 param,
                 0,
                 0);
-            if (trace)
+            if (isLocalPlayer)
+                Core.CrashTrace.Log($"[狀態] 本地玩家 gain {statusId} slot={i} dur={slots[i].RemainingTime:F1}");
+            else if (trace)
                 Core.CrashTrace.Log($"[狀態] {statusId} fallback Apply+OnGain 即讀={slots[i].RemainingTime:F1}s");
             return;
         }
@@ -255,6 +263,8 @@ internal static unsafe class Statuses
             // SetStatus 沒清乾淨就補一次直接移除，寧可留孤兒特效也不能留住狀態本身。
             if (slots[i].StatusId == statusId)
                 bc->StatusManager.RemoveStatus(i, 1);
+            if (Plugin.ObjectTable.LocalPlayer is { } lp && (nint)chara == lp.Address)
+                Core.CrashTrace.Log($"[狀態] 本地玩家 remove {statusId} slot={i} 之後={slots[i].StatusId}");
             return;
         }
     }

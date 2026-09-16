@@ -334,6 +334,16 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
     public SimStatus? FindStatus(ushort statusId)
         => FindStatus(statusId, null);
 
+    /// <summary>不分來源，移除這個 id 的每一份活躍狀態。</summary>
+    public void RemoveStatusAnySource(ushort statusId)
+    {
+        for (var i = 0; i < statusList.Count; i++)
+        {
+            var status = statusList[i];
+            if (status.IsActive && status.StatusId == statusId) status.Despawn();
+        }
+    }
+
     public SimStatus? FindStatus(ushort statusId, PartyRole? sourceRole)
     {
         for (var i = 0; i < statusList.Count; i++)

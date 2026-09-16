@@ -161,6 +161,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        Core.CrashTrace.Close();
         PluginInterface.UiBuilder.Draw -= WindowSystem.Draw;
         Framework.Update -= OnFrameworkUpdate;
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;

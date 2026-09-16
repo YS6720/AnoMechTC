@@ -15,7 +15,6 @@ namespace AnoMech.Core.Combat;
 /// </summary>
 internal sealed class RecordedAbilityRuntime
 {
-    private const byte PaladinJobId = 19;
     private const uint SprintActionId = 3;
     private const ushort SprintStatusId = 50;
     private const int SprintParam = 30;
@@ -66,8 +65,9 @@ internal sealed class RecordedAbilityRuntime
         if (!IsUsableActor(caster)) return false;
 
         var observed = catalog.IsObservedAction(classJob, actionId, level);
+        var jobRules = JobRules.StatusesFor(classJob);
         var explicitDefault = actionId == SprintActionId ||
-            (classJob == PaladinJobId && Paladin.IsKnownAction(actionId));
+            (jobRules?.IsKnownAction(actionId) == true);
         if (!observed && !explicitDefault) return false;
 
         var rules = catalog.FindExecutableRules(classJob, actionId, level);
@@ -91,8 +91,8 @@ internal sealed class RecordedAbilityRuntime
         var comboOk = RecordedAbilityEligibility.IsComboReady(prerequisite, state.Combo, state.ComboAge);
         UpdateCombo(state, actionId, comboOk, hasPrerequisite);
 
-        if (classJob == PaladinJobId && Paladin.IsKnownAction(actionId))
-            QueuePaladin(actionId, comboOk, state);
+        if (jobRules?.IsKnownAction(actionId) == true)
+            QueueJob(jobRules, actionId, comboOk, state);
 
         if (actionId == SprintActionId)
         {
@@ -104,13 +104,13 @@ internal sealed class RecordedAbilityRuntime
         foreach (var rule in rules)
         {
             if (rule.ActionId == SprintActionId && rule.StatusId == SprintStatusId) continue;
-            if (classJob == PaladinJobId && Paladin.IsOwnedTransition(actionId, rule.StatusId)) continue;
+            if (jobRules != null && JobRules.IsOwnedTransition(jobRules, actionId, rule.StatusId)) continue;
             var recipient = rule.TargetKind == RecordedAbilityTargetKind.Self ? state.Caster : target!;
             QueueApply(state, recipient, rule.StatusId, rule.Param!.Value, rule.DurationSeconds, rule.DelaySeconds);
         }
         foreach (var removal in removals)
         {
-            if (classJob == PaladinJobId && Paladin.IsOwnedTransition(actionId, removal.StatusId)) continue;
+            if (jobRules != null && JobRules.IsOwnedTransition(jobRules, actionId, removal.StatusId)) continue;
             var recipient = removal.TargetKind == RecordedAbilityTargetKind.Self ? state.Caster : target!;
             QueueRemove(state, recipient, removal.StatusId, removal.DelaySeconds);
         }
@@ -162,8 +162,8 @@ internal sealed class RecordedAbilityRuntime
                     case PendingKind.Remove:
                         outcome.Recipient.RemoveStatus(outcome.StatusId, outcome.SourceRole);
                         break;
-                    case PendingKind.Paladin:
-                        Paladin.Apply(outcome.ActionId, outcome.ComboOk, outcome.Caster, outcome.SourceRole);
+                    case PendingKind.Job:
+                        outcome.Rules!.Apply(outcome.ActionId, outcome.ComboOk, outcome.Caster, outcome.SourceRole);
                         break;
                 }
             }
@@ -248,9 +248,9 @@ internal sealed class RecordedAbilityRuntime
         }
     }
 
-    private void QueuePaladin(uint actionId, bool comboOk, RoleState state)
+    private void QueueJob(IJobStatusRules rules, uint actionId, bool comboOk, RoleState state)
     {
-        var touched = Paladin.TouchedStatuses(actionId, comboOk);
+        var touched = rules.TouchedStatuses(actionId, comboOk);
         if (touched.Count == 0) return;
         var stamps = new StatusStamp[touched.Count];
         for (var i = 0; i < touched.Count; i++)
@@ -259,7 +259,7 @@ internal sealed class RecordedAbilityRuntime
             stamps[i] = new(key, NextVersion(key));
         }
         queue.Add(0f, generation, stamps[^1].Version,
-            PendingOutcome.Paladin(state.Caster, state.Role, actionId, comboOk, stamps));
+            PendingOutcome.Job(rules, state.Caster, state.Role, actionId, comboOk, stamps));
     }
 
     private void QueueApply(RoleState state, SimCharacter recipient, ushort statusId,
@@ -299,7 +299,7 @@ internal sealed class RecordedAbilityRuntime
         if (outcome.Recipient is ISimPartyMember targetMember &&
             !ReferenceEquals(game.World.Party.Get(targetMember.Role), outcome.Recipient))
             return false;
-        if (outcome.Kind == PendingKind.Paladin)
+        if (outcome.Kind == PendingKind.Job)
         {
             foreach (var stamp in outcome.Stamps!)
                 if (!statusVersions.TryGetValue(stamp.Key, out var current) || current != stamp.Version)
@@ -313,7 +313,7 @@ internal sealed class RecordedAbilityRuntime
     {
         Apply,
         Remove,
-        Paladin,
+        Job,
     }
 
     private readonly record struct StatusVersionKey(SimCharacter Target, ushort StatusId, PartyRole SourceRole);
@@ -369,6 +369,7 @@ internal sealed class RecordedAbilityRuntime
         internal StatusVersionKey Key { get; }
         internal long Version { get; }
         internal StatusStamp[]? Stamps { get; }
+        internal IJobStatusRules? Rules { get; init; }
 
         internal static PendingOutcome Apply(SimCharacter caster, SimCharacter recipient, PartyRole sourceRole,
             ushort statusId, int param, float duration, StatusVersionKey key, long version)
@@ -380,9 +381,9 @@ internal sealed class RecordedAbilityRuntime
             => new(PendingKind.Remove, caster, recipient, sourceRole, statusId, 0, 0f,
                 0, false, key, version, null);
 
-        internal static PendingOutcome Paladin(SimCharacter caster, PartyRole sourceRole,
+        internal static PendingOutcome Job(IJobStatusRules rules, SimCharacter caster, PartyRole sourceRole,
             uint actionId, bool comboOk, StatusStamp[] stamps)
-            => new(PendingKind.Paladin, caster, caster, sourceRole, 0, 0, 0f,
-                actionId, comboOk, default, 0, stamps);
+            => new(PendingKind.Job, caster, caster, sourceRole, 0, 0, 0f,
+                actionId, comboOk, default, 0, stamps) { Rules = rules };
     }
 }

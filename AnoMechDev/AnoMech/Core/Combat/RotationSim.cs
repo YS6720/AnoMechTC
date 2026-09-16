@@ -34,6 +34,8 @@ public sealed unsafe class RotationSim : IDisposable
 
     // ActionCombo 反查：有哪些 action 以 X 為前置（＝用了 X 之後連段燈該亮）。
     private readonly HashSet<uint> startsCombo = new();
+    // 戰技（3）與魔法（2）：客戶端可在 GCD 轉動中先受理、GCD 到點才施放。能力技沒有這回事。
+    private readonly HashSet<uint> gcdActions = new();
     // X 自己的前置（0＝無）。
     private readonly Dictionary<uint, uint> prereqOf = new();
 
@@ -45,6 +47,7 @@ public sealed unsafe class RotationSim : IDisposable
             nextOf.Clear();
             foreach (var row in sheet)
             {
+                if (row.ActionCategory.RowId is 2 or 3) gcdActions.Add(row.RowId);
                 var pre = row.ActionCombo.RowId;
                 if (pre == 0) continue;
                 startsCombo.Add(pre);
@@ -98,8 +101,16 @@ public sealed unsafe class RotationSim : IDisposable
                 CrashTrace.Log($"[循環] UseAction a={actionId} ret={ret} inSim={inSim}");
             }
             var areaTargeted = outOpt != null && *outOpt;
-            if (ret == 0 && actionId is 16460 or 36918 or 36919 or 16459 or 25748 or 25749 or 25750)
-                CrashTrace.Log($"[循環] 按鍵被拒 a={actionId}（adjusted={am->GetAdjustedActionId(actionId)}）");
+            // 客戶端拒絕的按鍵（ret=0）全部記下原因碼：GetActionStatus 回 LogMessage id
+            // （0＝可用；例如 572 量譜不足、1122 前置條件不符）。以前只記騎士幾個 id，
+            // 2026-09-16 武士的明鏡止水被拒時什麼都看不到。
+            if (ret == 0 && actionType == ActionType.Action && inSim)
+            {
+                var adjusted = am->GetAdjustedActionId(actionId);
+                var status = am->GetActionStatus(ActionType.Action, adjusted);
+                var text = status == 0 ? "" : Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.LogMessage>()?.GetRowOrDefault(status)?.Text.ExtractText() ?? "";
+                CrashTrace.Log($"[循環] 按鍵被拒 a={actionId} adjusted={adjusted} status={status} {text}");
+            }
             if (ret != 0 && actionType == ActionType.Action && canProcess && !areaTargeted)
                 OnActionUsed(am, actionId, targetId);
         }
@@ -152,12 +163,18 @@ public sealed unsafe class RotationSim : IDisposable
         lastFired = actionId;
         lastFiredAt = now;
 
-        // 排隊受理 ≠ 實際施放——所有記帳延到 GCD 轉完才提交。
+        // 排隊受理 ≠ 實際施放——戰技／魔法的記帳延到 GCD 轉完才提交。
+        // 只看 GCD 類：能力技被客戶端受理（ret=1）就是立刻施放；有充能的能力技（明鏡止水兩層）
+        // 只要一層在冷卻 recast group 就 IsActive、Total 是整段（110 秒），照舊算會把開火排到
+        // 幾十秒後、場次換代就被清掉——2026-09-16 維護者實測明鏡止水「沒生效」就是這條。
         var fireDelay = 0.25f;
-        var grp = am->GetRecastGroup((int)ActionType.Action, actionId);
-        var rd = am->GetRecastGroupDetail(grp);
-        if (rd != null && rd->IsActive && rd->Elapsed > 0.2f)
-            fireDelay = MathF.Max(0.25f, rd->Total - rd->Elapsed + 0.1f);
+        if (gcdActions.Contains(actionId))
+        {
+            var grp = am->GetRecastGroup((int)ActionType.Action, actionId);
+            var rd = am->GetRecastGroupDetail(grp);
+            if (rd != null && rd->IsActive && rd->Elapsed > 0.2f)
+                fireDelay = MathF.Max(0.25f, rd->Total - rd->Elapsed + 0.1f);
+        }
 
         var fireId = actionId;
         var capturedGame = Plugin.GameInstance;
@@ -192,22 +209,40 @@ public sealed unsafe class RotationSim : IDisposable
             }
             CurrentCombo = shadowCombo;
             CrashTrace.Log($"[循環] a={fireId} comboOk={comboOk} shadow={shadowCombo} delay={fireDelay:F1}");
+            // 職業量譜只寫自己的客戶端記憶體（房主或成員都一樣），不進網路。
+            Jobs.JobRules.OnLocalFire(capturedClassJob, fireId, comboOk);
             // Local bookkeeping is complete before the host-authoritative submit.
             capturedGame.SubmitAbility(fireId, capturedClassJob, capturedLevel, capturedTargetId);
         });
 
         // 招式自身冷卻（瀝血劍 60s 這類）真環境由伺服器確認後啟動——模擬區沒確認，
         // 0.2s 後查該招 recast 沒轉就補踢。
+        // 充能技（明鏡止水 2 層）：客戶端自己的預測會把整組從零起算（elapsed=0 → 0 層），
+        // 真實只用掉一層。記住按下當時這組是不是「滿的」，0.2s 後把 Elapsed 推到「剩最後一層在轉」。
+        var chargeGroup = am->GetRecastGroup((int)ActionType.Action, fireId);
+        var chargeDetail = am->GetRecastGroupDetail(chargeGroup);
+        var wasIdleBeforePress = chargeDetail == null || !chargeDetail->IsActive;
         localEvents.Add(0.2f, () =>
         {
             var am2 = ActionManager.Instance();
             if (am2 == null) return;
             var group = am2->GetRecastGroup((int)ActionType.Action, fireId);
             var detail = am2->GetRecastGroupDetail(group);
-            if (detail != null && !detail->IsActive)
+            if (detail == null) return;
+            var charges = ActionManager.GetMaxCharges(fireId, 0);
+            if (!detail->IsActive)
             {
                 am2->StartCooldown(ActionType.Action, fireId);
                 CrashTrace.Log($"[循環] 補踢冷卻 a={fireId} grp={group}");
+            }
+            if (charges > 1 && wasIdleBeforePress && detail->IsActive && detail->Total > 0f)
+            {
+                var oneChargeLeft = detail->Total - detail->Total / charges;
+                if (detail->Elapsed < oneChargeLeft)
+                {
+                    detail->Elapsed = oneChargeLeft;
+                    CrashTrace.Log($"[循環] 充能修正 a={fireId} charges={charges} elapsed→{detail->Elapsed:F1}/{detail->Total:F1}");
+                }
             }
         });
         localEvents.Add(0.6f, () =>
@@ -287,6 +322,53 @@ public sealed unsafe class RotationSim : IDisposable
         }
     }
 
+    // 模擬區是隔離的：裡面的施放伺服器從沒看到，離開後真實冷卻應該等於「進場時的狀態減去
+    // 經過的時間」。進場快照全部 80 個 recast group，離場還原並補上經過時間。少了這步，
+    // 充能技（明鏡止水）離場後會停在模擬區裡被壓下去的冷卻上（維護者 2026-09-16）。
+    private const int RecastGroupCount = 80;
+    private readonly (bool IsActive, uint ActionId, float Elapsed, float Total)[] recastSnapshot = new (bool, uint, float, float)[RecastGroupCount];
+    private bool recastSnapshotTaken;
+    private long recastSnapshotAt;
+    private bool wasInSim;
+
+    private void SnapshotRecasts(ActionManager* am)
+    {
+        for (var i = 0; i < RecastGroupCount; i++)
+        {
+            var d = am->GetRecastGroupDetail(i);
+            recastSnapshot[i] = d == null ? default : (d->IsActive, d->ActionId, d->Elapsed, d->Total);
+        }
+        recastSnapshotTaken = true;
+        recastSnapshotAt = Environment.TickCount64;
+        CrashTrace.Log("[循環] 進模擬區：冷卻快照");
+    }
+
+    private void RestoreRecasts(ActionManager* am)
+    {
+        if (!recastSnapshotTaken) return;
+        recastSnapshotTaken = false;
+        var passed = (Environment.TickCount64 - recastSnapshotAt) / 1000f;
+        var restored = 0;
+        for (var i = 0; i < RecastGroupCount; i++)
+        {
+            var d = am->GetRecastGroupDetail(i);
+            if (d == null) continue;
+            var s = recastSnapshot[i];
+            if (!s.IsActive)
+            {
+                if (!d->IsActive) continue;
+                d->IsActive = false; d->Elapsed = 0f;
+                restored++;
+                continue;
+            }
+            var elapsed = s.Elapsed + passed;
+            if (elapsed >= s.Total) { d->IsActive = false; d->Elapsed = 0f; }
+            else { d->IsActive = true; d->ActionId = s.ActionId; d->Elapsed = elapsed; d->Total = s.Total; }
+            restored++;
+        }
+        CrashTrace.Log($"[循環] 離模擬區：冷卻還原 {restored} 組（經過 {passed:F0}s）");
+    }
+
     private void ReassertCombo(Dalamud.Plugin.Services.IFramework _)
     {
         try
@@ -297,11 +379,25 @@ public sealed unsafe class RotationSim : IDisposable
             var delta = MathF.Max(0f, (now - lastUpdateMilliseconds) / 1000f);
             lastUpdateMilliseconds = now;
             var inSim = game.World.Map.IsInInstance;
+            if (inSim != wasInSim)
+            {
+                var amx = ActionManager.Instance();
+                if (amx != null)
+                {
+                    if (inSim) SnapshotRecasts(amx);
+                    else RestoreRecasts(amx);
+                }
+                wasInSim = inSim;
+            }
             var generation = game.ScenarioDispatchGeneration;
             if (generation != schedulerGeneration || !inSim || !game.HasActivePractice)
             {
                 localEvents.Clear();
                 ResetLocalState();
+                // 量譜只在模擬區內、新場次開始那一刻歸零。模擬區外這個分支每幀都會走，
+                // 在那裡歸零等於把真伺服器的量譜每幀清掉。
+                if (inSim && game.HasActivePractice && generation != schedulerGeneration)
+                    Jobs.JobRules.ResetLocalGauge();
                 schedulerGeneration = generation;
                 if (!inSim || !game.HasActivePractice) return;
             }

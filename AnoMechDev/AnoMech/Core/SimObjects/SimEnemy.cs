@@ -402,17 +402,14 @@ public sealed unsafe class SimEnemy : SimNpc
     /// 0.22.4.0 起敵人拔刀，從那時起每次 SetVisible(false) 都在漏這個）。三個槽位一起切。
     /// 武器模型是非同步載入的，隱形期間每幀再壓一次（見 Tick），免得晚到的武器自己亮起來。
     /// </summary>
-    private static void SetWeaponsVisible(BattleChara* chara, bool visible, bool quiet = false)
+    private static void SetWeaponsVisible(BattleChara* chara, bool visible)
     {
         for (var s = 0; s < 3; s++)
         {
             var w = chara->DrawData.WeaponData[s].DrawObject;
-            // [DEBUG-wpn] 2026-09-02 實測這條路徑關不掉武器（維護者：「還是一樣」）——留痕
-            // 三個槽位的 DrawObject 指標與旗標，下一輪 trace 就能分辨是「指標為空（武器不在
-            // WeaponData 底下）」還是「旗標寫了沒用」。人型騎士已改走 Despawn 繞開（DsrP5Wrath）。
-            if (!visible && !quiet)
-                CrashTrace.Log($"[DEBUG-wpn] slot{s} draw=0x{(nint)w:X} visible={(w != null ? w->IsVisible : false)} "
-                             + $"model={chara->DrawData.WeaponData[s].ModelId.Id} hiddenFlag={chara->DrawData.IsWeaponHidden}");
+            // 2026-09-02 實測這條路徑關不掉武器（維護者：「還是一樣」）。診斷結論（9/16 撤除）：
+            // 三個槽位的 DrawObject 指標一律為空（draw=0x0 model=0）——武器不在 WeaponData 底下，
+            // 不是旗標寫了沒用。人型騎士已改走 Despawn 繞開（DsrP5Wrath）。
             if (w != null && w->IsVisible != visible) w->IsVisible = visible;
         }
     }
@@ -464,7 +461,7 @@ public sealed unsafe class SimEnemy : SimNpc
     {
         base.Tick(deltaSeconds);
         ReconcileVisibility();
-        if (!desiredVisible && BattleCharaPtr != null) SetWeaponsVisible(BattleCharaPtr, false, quiet: true);
+        if (!desiredVisible && BattleCharaPtr != null) SetWeaponsVisible(BattleCharaPtr, false);
         cast.Tick(deltaSeconds);
     }
 

@@ -16,9 +16,12 @@ public sealed class TopP3IntermissionState
 {
     public PartyRole PlayerRole { get; }
 
-    public TopP3IntermissionState(PartyRole playerRole)
+    public TopP3CannonAssignment Assignment { get; }
+
+    public TopP3IntermissionState(PartyRole playerRole, TopP3CannonAssignment assignment)
     {
         PlayerRole = playerRole;
+        Assignment = assignment;
     }
 }
 
@@ -55,7 +58,8 @@ public sealed class TopP3IntermissionScenario : IScenario, IScenarioPartyPreset
     {
         world = worldParam;
         party = world.Party;
-        state = new TopP3IntermissionState(party.PlayerRole);
+        // 每次開始重新點名：六人被點（四狙擊、兩大功率）、兩人不點，站位依優先序推導。
+        state = new TopP3IntermissionState(party.PlayerRole, TopP3CannonAssignment.FromShuffled(new Rng().Shuffle(TopP3CannonAssignment.Priority.ToArray())));
         topUtils = new TopUtils(world);
         boss = null;
         centralVoidzone = null;
@@ -189,7 +193,7 @@ public sealed class TopP3IntermissionScenario : IScenario, IScenarioPartyPreset
 
     private void ApplyPointMarkers()
     {
-        foreach (var assignment in TopP3IntermissionRules.MarkerAssignments)
+        foreach (var assignment in state.Assignment.MarkerAssignments)
         {
             var status = assignment.Kind == TopP3CannonKind.Spread
                 ? TopP3IntermissionRules.StatusId.SniperCannonMarker
@@ -201,7 +205,10 @@ public sealed class TopP3IntermissionScenario : IScenario, IScenarioPartyPreset
                 param: 0,
                 duration: TopP3IntermissionRules.MarkerDuration);
         }
-        Core.ChatOutput.Coach("[AnoMech] P3 轉場點名 —— 外圈躲波，砲位固定（P01～P08）");
+        var player = state.Assignment.CannonGroupFor(state.PlayerRole);
+        var role = player.Kind == TopP3CannonKind.Spread ? "狙擊式波動泡"
+            : player.MarkerRole == state.PlayerRole ? "狙擊式大功率波動砲" : "未點名，去分攤";
+        Core.ChatOutput.Coach($"[AnoMech] P3 轉場點名 —— 你是「{role}」，等待點 {state.Assignment.WaitLabelFor(state.PlayerRole)}，砲位 {state.Assignment.LabelFor(state.PlayerRole)}（A 為北；優先序 H1 MT ST D1 D2 D3 D4 H2）");
     }
 
     private void RemovePointMarkers()
@@ -293,11 +300,11 @@ public sealed class TopP3IntermissionScenario : IScenario, IScenarioPartyPreset
         // Every group, marker centre, and victim is derived from one
         // pre-resolution snapshot. Fixed coordinates are AI destinations only.
         var snapshot = Snapshot();
-        foreach (var group in TopP3IntermissionRules.CannonGroups)
+        foreach (var group in state.Assignment.CannonGroups)
             SpawnCannon(group, snapshot);
 
-        var results = TopP3IntermissionRules.ResolveCannons(snapshot);
-        var hitCounts = TopP3IntermissionRules.CountCannonHits(snapshot);
+        var results = state.Assignment.ResolveCannons(snapshot);
+        var hitCounts = state.Assignment.CountCannonHits(snapshot);
         foreach (var result in results)
         {
             if (result.Result == TopP3CannonResult.Correct) continue;
@@ -313,7 +320,7 @@ public sealed class TopP3IntermissionScenario : IScenario, IScenarioPartyPreset
                 member => member.Role == result.Group.MarkerRole);
             var hasLiveHit = hitCounts.Any(hit =>
                 hit.Count > 0
-                && TopP3IntermissionRules.CannonGroupFor(hit.Role).Label
+                && state.Assignment.CannonGroupFor(hit.Role).Label
                     == result.Group.Label);
             if (markerPresent && !hasLiveHit)
             {
@@ -327,7 +334,7 @@ public sealed class TopP3IntermissionScenario : IScenario, IScenarioPartyPreset
             if (hit.Count == 0) continue;
             var member = party.Get(hit.Role);
             if (member == null || !member.IsAlive()) continue;
-            var group = TopP3IntermissionRules.CannonGroupFor(hit.Role);
+            var group = state.Assignment.CannonGroupFor(hit.Role);
             var failedShare = results.Any(result => result.Group.Label == group.Label
                                                     && result.Result != TopP3CannonResult.Correct);
             // A wrong share is a failed resolution for the sole soaker; an

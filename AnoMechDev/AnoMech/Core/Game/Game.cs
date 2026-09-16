@@ -485,7 +485,6 @@ public sealed partial class Game : IDisposable
         {
             var id = slots[i].StatusId;
             if (id == 0 || id == 48) continue;
-            // 同 Statuses.Remove：走 SetStatus（refreshFlags=true）才會收掉 StatusLoopVFX。
             bc->StatusManager.SetStatus(i, 0, 0f, 0, default, true);
             if (slots[i].StatusId == id)
                 bc->StatusManager.RemoveStatus(i, 1);

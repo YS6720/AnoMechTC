@@ -18,8 +18,25 @@ namespace AnoMech.Core.Combat.Jobs;
 // 遊戲本體是有 30 秒倒數的，寫負值等於把它藏掉。改成不覆寫——SimStatus.Tick 每幀把
 // 遞減中的 RemainingTime 寫進原生槽，倒數就跟著跑。狀態的存活仍由 SimStatus 決定，
 // 不是交給引擎：它在 RemainingTime 歸零時 Despawn，與寫入值一致。
-internal static class Paladin
+internal sealed class Paladin : IJobStatusRules
 {
+    internal const byte JobId = 19;
+    internal static readonly Paladin Instance = new();
+
+    // 武裝戌守（Passage of Arms）是引導技：站著不動就持續，移動或用任何技能立刻結束。
+    // 實錄規則只有「7385 → 掛 1175 17.95 秒」，沒有取消條件；9/15 記為暫不處理，維護者
+    // 2026-09-16 明確要求：「人物動了放技能他正常要馬上停止」——否則每個 GCD 新掛的連段狀態
+    // 走 OnGainStatus 時，引擎會把還在槽裡的 1175 翅膀重播一次。
+    internal const ushort PassageOfArms = 1175;
+
+    /// <summary>移動輸入或按下任何技能的那一幀呼叫；有引導中的狀態就結束它。</summary>
+    internal static void CancelChanneled(SimCharacter player)
+    {
+        // 實錄規則建立的 1175 帶著騎士角色來源；HasStatus／RemoveStatus 的無來源版本是
+        // 「來源＝null」精確比對，永遠找不到（9/16 trace：放技能後沒有任何 remove）。
+        player.RemoveStatusAnySource(PassageOfArms);
+    }
+
     private const uint FightOrFlight = 20;
     private const uint RoyalAuthority = 3539;
     private const uint GoringBlade = 3538;
@@ -43,18 +60,11 @@ internal static class Paladin
     private const ushort ConfiteorReady = 3019;     // 悔罪預備
     private const ushort GoringBladeReady = 3847;   // 瀝血劍預備（戰逃反應給）
 
-    internal static bool IsKnownAction(uint actionId)
+    public bool IsKnownAction(uint actionId)
         => actionId is FightOrFlight or RoyalAuthority or GoringBlade or Atonement or
             Supplication or Sepulchre or HolySpirit or HolyCircle or Requiescat or
             Imperator or Confiteor or BladeOfFaith or BladeOfTruth or BladeOfValor;
 
-
-    internal static bool IsOwnedTransition(uint actionId, ushort statusId)
-    {
-        foreach (var owned in TouchedStatuses(actionId, comboOk: true))
-            if (owned == statusId) return true;
-        return false;
-    }
 
     internal static bool AppliesStatus(uint actionId, bool comboOk)
         => actionId switch
@@ -66,7 +76,7 @@ internal static class Paladin
             _ => false,
         };
 
-    internal static IReadOnlyList<ushort> TouchedStatuses(uint actionId, bool comboOk)
+    public IReadOnlyList<ushort> TouchedStatuses(uint actionId, bool comboOk)
         => actionId switch
         {
             FightOrFlight or GoringBlade => [GoringBladeReady],
@@ -80,7 +90,7 @@ internal static class Paladin
             _ => Array.Empty<ushort>(),
         };
 
-    internal static void Apply(uint actionId, bool comboOk, SimCharacter player, PartyRole sourceRole)
+    public void Apply(uint actionId, bool comboOk, SimCharacter player, PartyRole sourceRole)
     {
         if (!AppliesStatus(actionId, comboOk)) return;
         var sourceObject = player.GameObjectId;

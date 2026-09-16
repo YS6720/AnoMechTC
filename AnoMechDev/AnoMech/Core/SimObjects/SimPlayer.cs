@@ -54,6 +54,8 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
     {
         base.Tick(deltaSeconds);
         SampleActivity();
+        // 引導技（武裝戌守）在移動或按技能的那一幀就結束，跟遊戲本體一致。
+        if (IsMoving) Combat.Jobs.Paladin.CancelChanneled(this);
         SyncInputLock();
     }
 

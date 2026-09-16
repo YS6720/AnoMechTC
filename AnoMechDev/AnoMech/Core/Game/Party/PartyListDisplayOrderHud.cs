@@ -38,6 +38,14 @@ internal sealed unsafe class PartyListDisplayOrderHud : IDisposable
     public PartyListDisplayOrderHud()
     {
         Plugin.AddonLifecycle.RegisterListener(AddonEvent.PostSetup, AddonName, OnAddonPostSetup);
+        // The game re-lays every row back to its native slot inside OnRequestedUpdate /
+        // OnRefresh — which fire on each HP/MP change, i.e. nearly every frame of a
+        // simulated fight — and that layout is drawn the same frame. Applying only in
+        // PreDraw put our order back one callback too late, so the list flashed to the
+        // native order for a frame on every update (maintainer 2026-09-16: 「一直抖動」).
+        // Re-apply right after the game's own layout so the frame never shows it.
+        Plugin.AddonLifecycle.RegisterListener(AddonEvent.PostRequestedUpdate, AddonName, OnAddonPreDraw);
+        Plugin.AddonLifecycle.RegisterListener(AddonEvent.PostRefresh, AddonName, OnAddonPreDraw);
         Plugin.AddonLifecycle.RegisterListener(AddonEvent.PreDraw, AddonName, OnAddonPreDraw);
         Plugin.AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, AddonName, OnAddonPreFinalize);
     }
@@ -90,6 +98,8 @@ internal sealed unsafe class PartyListDisplayOrderHud : IDisposable
     {
         Clear();
         Plugin.AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, AddonName, OnAddonPostSetup);
+        Plugin.AddonLifecycle.UnregisterListener(AddonEvent.PostRequestedUpdate, AddonName, OnAddonPreDraw);
+        Plugin.AddonLifecycle.UnregisterListener(AddonEvent.PostRefresh, AddonName, OnAddonPreDraw);
         Plugin.AddonLifecycle.UnregisterListener(AddonEvent.PreDraw, AddonName, OnAddonPreDraw);
         Plugin.AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, AddonName, OnAddonPreFinalize);
     }
