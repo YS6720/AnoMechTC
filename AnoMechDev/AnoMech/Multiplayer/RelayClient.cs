@@ -50,6 +50,24 @@ public sealed class RelayClient : IRelayTransport
     private Guid currentRunId;
     private long lastInboundTimestamp;
     private readonly Queue<long> outboundMessageTimes = new();
+    // Health readout only (see RelayTransportStats).  Heartbeat RTT is measured from the
+    // moment the heartbeat is queued, so a stalled send loop inflates it on purpose.
+    private long heartbeatSentTimestamp;
+    private double rttMilliseconds = -1;
+    private long skippedLatestState;
+
+    public RelayTransportStats Stats
+    {
+        get
+        {
+            int send, receive;
+            lock (sendLock) send = sendQueue.Count;
+            lock (receiveLock) receive = receiveQueue.Count;
+            double rtt;
+            lock (stateLock) rtt = rttMilliseconds;
+            return new RelayTransportStats(rtt, send, receive, Interlocked.Read(ref skippedLatestState));
+        }
+    }
 
     public RelayStatus Status
     {
@@ -230,10 +248,15 @@ public sealed class RelayClient : IRelayTransport
         {
             MpError? failure = null;
             var signal = false;
+            // A latest-state sample (pose / roles / world) is superseded by the next one, so
+            // rate or queue pressure just skips this sample instead of closing the room.
+            // Reliable messages keep failing hard: dropping one would desync the run.
+            var latest = message is ILatestState;
             lock (sendLock)
             {
                 if (!AcceptOutboundRateLocked())
                 {
+                    if (latest) { Interlocked.Increment(ref skippedLatestState); return true; }
                     failure = MpError.RateLimit;
                 }
                 else
@@ -241,10 +264,12 @@ public sealed class RelayClient : IRelayTransport
                     var sequence = ++nextSequence;
                     var packet = new ClientPacket(MpLimits.ProtocolVersion, sequence, runId, message);
                     var bytes = WireProtocol.EncodeClientPacket(packet);
-                    var latest = message is ILatestState;
                     var key = latest ? new StateKey(local!.PeerId, runId, message.GetType()) : (StateKey?)null;
                     if (!EnqueueSendLocked(new OutboundFrame(bytes, latest, key), out signal))
+                    {
+                        if (latest) { Interlocked.Increment(ref skippedLatestState); return true; }
                         failure = MpError.QueueOverflow;
+                    }
                 }
             }
             if (failure is { } error)
@@ -451,7 +476,14 @@ public sealed class RelayClient : IRelayTransport
                     return;
                 }
                 if (control.Kind == RelayControlKind.HeartbeatAck)
+                {
+                    lock (stateLock)
+                    {
+                        if (heartbeatSentTimestamp != 0)
+                            rttMilliseconds = Stopwatch.GetElapsedTime(heartbeatSentTimestamp).TotalMilliseconds;
+                    }
                     continue;
+                }
                 if (control.Kind == RelayControlKind.PeerJoined)
                 {
                     Interlocked.Increment(ref membershipGeneration);
@@ -530,6 +562,7 @@ public sealed class RelayClient : IRelayTransport
                 var sequence = ++nextSequence;
                 var bytes = WireProtocol.EncodeControl(Guid.Empty, RelayControlKind.Heartbeat, Guid.Empty, sequence);
                 var key = new StateKey(Guid.Empty, Guid.Empty, typeof(RelayControlKind));
+                lock (stateLock) heartbeatSentTimestamp = Stopwatch.GetTimestamp();
                 queued = EnqueueSendLocked(new OutboundFrame(bytes, true, key), out var shouldSignal);
                 if (shouldSignal)
                     sendSignal.Release();
@@ -617,9 +650,10 @@ public sealed class RelayClient : IRelayTransport
                 }
                 else if (currentRunId == Guid.Empty || packet.RunId != currentRunId)
                 {
-                    // An authenticated in-flight sample can outlive EndRun on another socket.
-                    // Consume its sequence, but never give it a new game/native lifetime.
-                    if (retiredRuns.Contains(packet.RunId))
+                    // An authenticated in-flight sample can outlive EndRun on another socket,
+                    // and a peer that joined mid-run sees the host's run traffic for a run it
+                    // was never checked into. Consume the sequence, never give it a lifetime.
+                    if (currentRunId == Guid.Empty || retiredRuns.Contains(packet.RunId))
                     {
                         dispatch = false;
                         return true;
@@ -653,12 +687,15 @@ public sealed class RelayClient : IRelayTransport
     }
     private bool AcceptOutboundRateLocked()
     {
-        var now = Stopwatch.GetTimestamp();
-        outboundMessageTimes.Enqueue(now);
+        // Only accepted messages occupy the window: a skipped pose sample must not keep the
+        // sender pinned at the limit for the rest of the second.
         while (outboundMessageTimes.Count > 0 &&
                Stopwatch.GetElapsedTime(outboundMessageTimes.Peek()).TotalSeconds > 1)
             outboundMessageTimes.Dequeue();
-        return outboundMessageTimes.Count <= MpLimits.MessagesPerSenderSecond;
+        if (outboundMessageTimes.Count >= MpLimits.MessagesPerSenderSecond)
+            return false;
+        outboundMessageTimes.Enqueue(Stopwatch.GetTimestamp());
+        return true;
     }
     private bool EnqueueSendLocked(OutboundFrame frame, out bool shouldSignal)
     {

@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using AnoMech.Core;
 
 namespace AnoMech.Multiplayer;
 
@@ -20,6 +21,11 @@ internal sealed partial class MultiplayerManager
     private sealed record HostingState(Uri Endpoint, bool LocalOnly, HostedRelay? Owned, RelayClient? Client = null);
 
     private HostingState? hostingState;
+    // Owned-tunnel recovery: cloudflared exiting used to close the whole room. Now the host
+    // restarts it (bounded attempts) and members rejoin with the same invitation.
+    private const int MaxTunnelRestarts = 3;
+    private Task? tunnelRestart;
+    private int tunnelRestartAttempts;
     private Task? hostingCleanup;
     private long connectionGeneration;
     private long hostingGeneration;
@@ -228,12 +234,46 @@ internal sealed partial class MultiplayerManager
             }
         }
         // Only a relay/tunnel we started ourselves can be health-checked or torn down here.
-        if (hostingState is { Owned: { } activeOwned } && !activeOwned.IsRunning)
+        if (hostingState is { Owned: { } activeOwned })
         {
-            DisconnectInternal();
-            ConnectionStatus = "外網連線服務已停止，房間已關閉；請重新建立房間。";
-            Report(MpError.TransportFailure);
-            return false;
+            if (tunnelRestart is { IsCompleted: true } finished)
+            {
+                tunnelRestart = null;
+                if (finished.IsFaulted)
+                {
+                    var why = finished.Exception?.GetBaseException();
+                    CrashTrace.Log($"[多人] 隧道重啟失敗（第 {tunnelRestartAttempts} 次）：{why?.GetType().Name} {why?.Message}");
+                }
+                else
+                {
+                    tunnelRestartAttempts = 0;
+                    ConnectionStatus = "外網隧道已恢復；掉線的成員可用原邀請重新加入。";
+                    ChatOutput.Coach("[多人同步] 外網隧道已恢復，掉線的成員可用原邀請重新加入。");
+                }
+            }
+            if (activeOwned.TunnelDown && tunnelRestart is null)
+            {
+                if (tunnelRestartAttempts >= MaxTunnelRestarts)
+                {
+                    DisconnectInternal();
+                    ConnectionStatus = "外網隧道連續重啟失敗，房間已關閉；請檢查 cloudflared 設定後重新建立房間。";
+                    Report(MpError.TransportFailure);
+                    return false;
+                }
+                tunnelRestartAttempts++;
+                ConnectionStatus = $"外網隧道中斷，正在重新建立（第 {tunnelRestartAttempts}／{MaxTunnelRestarts} 次）…房間保留，成員稍後可用原邀請重新加入。";
+                CrashTrace.Log($"[多人] 隧道中斷，重啟第 {tunnelRestartAttempts} 次");
+                if (tunnelRestartAttempts == 1)
+                    ChatOutput.Error("[多人同步] 外網隧道中斷，正在重新建立；房間保留，掉線的成員稍後可用原邀請重新加入。");
+                tunnelRestart = activeOwned.RestartTunnelAsync(CancellationToken.None);
+            }
+            else if (!activeOwned.IsRunning && !activeOwned.TunnelDown)
+            {
+                DisconnectInternal();
+                ConnectionStatus = "本機連線服務已停止，房間已關閉；請重新建立房間。";
+                Report(MpError.TransportFailure);
+                return false;
+            }
         }
         if (connection is { IsCompleted: true } completed)
         {
@@ -300,6 +340,8 @@ internal sealed partial class MultiplayerManager
         // else: leaving the room must never stop their service.
         var activeHost = hostingState?.Owned;
         hostingState = null;
+        tunnelRestart = null;
+        tunnelRestartAttempts = 0;
         var pendingConnection = connection;
         connection = null;
         if (pendingHost != null || activeHost != null || pendingConnection != null || cancellation != null)

@@ -74,6 +74,9 @@ public sealed class HostedRelay : IAsyncDisposable
     private readonly bool localOnly;
     private readonly Uri publicEndpoint;
     private readonly RelayConnectionOptions hostConnection;
+    private readonly string hostAuthorization;
+    private readonly string? tunnelExecutable;
+    private readonly string? tunnelConfigPath;
     private Task? disposeTask;
     private bool disposed;
 
@@ -82,12 +85,17 @@ public sealed class HostedRelay : IAsyncDisposable
         HostedTunnelProcess? tunnel,
         bool localOnly,
         Uri publicEndpoint,
-        string hostAuthorization)
+        string hostAuthorization,
+        string? cloudflaredExecutable,
+        string? tunnelConfigPath)
     {
         this.relay = relay;
         this.tunnel = tunnel;
         this.localOnly = localOnly;
         this.publicEndpoint = publicEndpoint;
+        this.hostAuthorization = hostAuthorization;
+        tunnelExecutable = cloudflaredExecutable;
+        this.tunnelConfigPath = tunnelConfigPath;
         hostConnection = new RelayConnectionOptions(
             new Uri($"ws://127.0.0.1:{relay.Port}/"), true, string.Empty, hostAuthorization);
     }
@@ -117,6 +125,78 @@ public sealed class HostedRelay : IAsyncDisposable
             // 真的由我們拉起來的 tunnel 死掉，仍然要判為停止。
             return currentRelay?.IsRunning == true && currentTunnel is not { IsRunning: false };
         }
+    }
+
+    /// <summary>
+    /// The relay is fine but the cloudflared process we own has exited. Distinguished from
+    /// IsRunning so the host can restart the tunnel and keep the room instead of closing it:
+    /// members reconnect with the same invitation once the public hostname answers again.
+    /// </summary>
+    public bool TunnelDown
+    {
+        get
+        {
+            lock (sync)
+                return !disposed && relay?.IsRunning == true && tunnel is { IsRunning: false };
+        }
+    }
+
+    /// <summary>
+    /// Replace the exited tunnel process and wait until the public endpoint reaches this relay
+    /// again. Throws HostingException on failure; the old process is disposed either way and
+    /// TunnelDown stays true so the caller can retry.
+    /// </summary>
+    public async Task RestartTunnelAsync(CancellationToken cancellationToken = default)
+    {
+        RelayServer? currentRelay;
+        HostedTunnelProcess? old;
+        lock (sync)
+        {
+            if (disposed || relay is null || tunnel is null || tunnelExecutable is null || tunnelConfigPath is null)
+                throw new InvalidOperationException("No owned tunnel to restart.");
+            currentRelay = relay;
+            old = tunnel;
+        }
+        await old.DisposeAsync().ConfigureAwait(false);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(StartupSeconds));
+        HostedTunnelProcess fresh;
+        try
+        {
+            fresh = await HostedTunnelProcess.StartAsync(tunnelExecutable, tunnelConfigPath, deadline.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch { throw new HostingException(HostingError.TunnelStartFailed); }
+        try
+        {
+            if (!fresh.IsRunning)
+                throw new HostingException(HostingError.TunnelStartFailed);
+            await ProbePublicEndpointAsync(
+                publicEndpoint, hostAuthorization, currentRelay.InstanceId, currentRelay, fresh, deadline.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            await fresh.DisposeAsync().ConfigureAwait(false);
+            throw new HostingException(HostingError.PublicEndpointUnavailable);
+        }
+        catch
+        {
+            await fresh.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+        var adopt = false;
+        lock (sync)
+        {
+            if (!disposed && ReferenceEquals(relay, currentRelay))
+            {
+                tunnel = fresh;
+                adopt = true;
+            }
+        }
+        if (!adopt)
+            await fresh.DisposeAsync().ConfigureAwait(false);
     }
 
     // activityLog: room lifecycle and drop reasons from the embedded relay. Optional so the
@@ -203,7 +283,9 @@ public sealed class HostedRelay : IAsyncDisposable
                 tunnel,
                 options.LocalOnly,
                 publicEndpoint!,
-                hostAuthorization);
+                hostAuthorization,
+                tunnel is null ? null : options.CloudflaredExecutable,
+                tunnel is null ? null : options.TunnelConfigPath);
             relay = null;
             tunnel = null;
             return result;

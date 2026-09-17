@@ -25,6 +25,26 @@ public sealed unsafe class SimNetworkPuppet : SimNpc, ISimPartyMember
     public bool IsMoving { get; private set; }
     public bool IsActing { get; private set; }
     internal event Action<WorldEvent>? NetworkControl;
+    // The owner left mid-run. From here the slot behaves like an AI stand-in: scheduled
+    // AI moves drive the native model from the last verified pose, and Position/Rotation
+    // read the model instead of a network sample that will never arrive again. The other
+    // seven keep playing; before 2026-09-17 a single drop ended the run for the whole room.
+    internal bool Orphaned { get; private set; }
+
+    internal void Orphan()
+    {
+        if (Orphaned) return;
+        if (hasNetworkPose)
+        {
+            display.Snap(networkPosition, networkRotation);
+            base.SetPosition(networkPosition);
+            base.SetRotation(networkRotation);
+        }
+        hasNetworkPose = false;
+        IsMoving = false;
+        IsActing = false;
+        Orphaned = true;
+    }
 
     internal SimNetworkPuppet(int index, Coordinates coordinates, PartyRole role, byte classJob, string name)
         : base(index, coordinates)
@@ -58,7 +78,7 @@ public sealed unsafe class SimNetworkPuppet : SimNpc, ISimPartyMember
     // game is paused, exactly like ApplyNetworkPose. Mechanics never see this pose.
     internal void UpdateVisualPose(float deltaSeconds)
     {
-        if (!hasNetworkPose)
+        if (!hasNetworkPose || Orphaned)
             return;
         if (display.Advance(deltaSeconds))
             PushDisplayPose();
@@ -100,6 +120,7 @@ public sealed unsafe class SimNetworkPuppet : SimNpc, ISimPartyMember
     // echoes. The receiver applies them only to the addressed local owner.
     public override void SetPosition(Vector3 position)
     {
+        if (Orphaned) { base.SetPosition(position); return; }
         networkRotation = Rotation;
         networkPosition = position;
         hasNetworkPose = true;
@@ -109,6 +130,7 @@ public sealed unsafe class SimNetworkPuppet : SimNpc, ISimPartyMember
 
     public override void SetRotation(float rotation)
     {
+        if (Orphaned) { base.SetRotation(rotation); return; }
         networkPosition = Position;
         networkRotation = rotation;
         hasNetworkPose = true;
@@ -167,15 +189,20 @@ public sealed unsafe class SimNetworkPuppet : SimNpc, ISimPartyMember
         native->Timeline.PlayActionTimeline(timeline, 0);
     }
 
-    private sealed class PuppetMovement(SimCharacter parent) : Movement(parent)
+    private sealed class PuppetMovement(SimNetworkPuppet parent) : Movement(parent)
     {
         // This intentional control gate mirrors PlayerMovement. Real forced
         // movement is delivered as a reliable Host event to the owning client.
+        // Once orphaned the gate opens and the slot walks like an AI stand-in.
         public override void MoveTo(Vector3 target, float speed = 6f, float? finalRotation = null,
             ushort timeline = RunTimelineId, bool baseOverride = true)
-        { }
+        {
+            if (parent.Orphaned) base.MoveTo(target, speed, finalRotation, timeline, baseOverride);
+        }
 
         public override void MoveRecorded(Vector3 target, float duration, float? finalRotation = null)
-        { }
+        {
+            if (parent.Orphaned) base.MoveRecorded(target, duration, finalRotation);
+        }
     }
 }

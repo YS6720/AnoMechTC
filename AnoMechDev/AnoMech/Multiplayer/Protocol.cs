@@ -24,7 +24,11 @@ public static class MpLimits
     // 深度＝liveness 內會累積的訊息量；超過 liveness 心跳逾時本來就會斷，再大沒有意義。
     public const int SendQueue = (int)(LivenessSeconds * (PoseHz + SnapshotHz));
     public const int ReceiveQueue = SendQueue;
-    public const int DrainPerTick = 32;
+    // 收訊排空改成時間預算而不是「每幀固定 N 筆」：房主 alt-tab 時遊戲 FPS 掉到 15～30，
+    // 固定筆數的排空能力跟著腰斬，訊息堆積 → 成員看到延遲、嚴重就 QueueOverflow。
+    // 每幀最多花 DrainBudgetMilliseconds 排空，DrainPerTickMax 只是防止單幀失控的硬上限。
+    public const double DrainBudgetMilliseconds = 3;
+    public const int DrainPerTickMax = 512;
     public const int MessagesPerSenderSecond = 256;
     // 突發額度＝relay 願意容忍的靜默時間 × 單向送出頻率。這個數字**不可以自己挑**：
     // 固定 512 時實測 5 秒收包停頓會把七個 peer 全部踢掉（512÷120≈4.3 秒就耗盡），
@@ -34,7 +38,10 @@ public static class MpLimits
     // 持續速率仍是 MessagesPerSenderSecond（256/s），防洪主防線不受影響。
     public const int RelayIngressBurst = (int)(LivenessSeconds * PoseHz);
     public const int SnapshotHz = 20;
-    public const int PoseHz = 120;
+    // 60 Hz：遠端顯示固定落後 50 ms 插值，60 Hz 每個窗內仍有 3 筆取樣，畫面與 120 Hz 無異；
+    // 而 relay／cloudflared 的訊息量直接砍半。另外姿勢只在**有變化**時送（見
+    // MultiplayerSession.AfterGameTick），靜止時降到 SnapshotHz 的 keepalive（2026-09-17）。
+    public const int PoseHz = 60;
     public const int AliasCharacters = 64;
     public const int Enemies = 64;
     public const int EventObjects = 40;
@@ -55,6 +62,14 @@ public static class MpLimits
     public const double PrepareSeconds = 15;
     public const double IoTimeoutSeconds = 10;
 }
+
+/// <summary>
+/// Transport-level health for the UI: none of this is authoritative for game state.
+/// RttMilliseconds is heartbeat round-trip through the relay including local queue wait
+/// (so a stalled send loop shows up here too); negative means not measured yet.
+/// </summary>
+public readonly record struct RelayTransportStats(
+    double RttMilliseconds, int SendQueueDepth, int ReceiveQueueDepth, long SkippedLatestState);
 
 public enum MpError
 {

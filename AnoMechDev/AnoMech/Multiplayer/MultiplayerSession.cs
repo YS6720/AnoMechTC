@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using AnoMech.Core.Game.Party;
 
@@ -28,6 +29,13 @@ public sealed class MultiplayerSession : IDisposable
     private double deadline;
     private double nextSnapshot;
     private double nextPoseSnapshot;
+    // Change gating for pose traffic: send at PoseHz only while something moved, otherwise
+    // fall back to a SnapshotHz keepalive so statuses/HP in the roles snapshot still land
+    // within 50 ms and the receiver never waits on a sample that will not come.
+    private double nextPoseKeepalive;
+    private SelfPoseMessage? lastSelfPose;
+    private readonly MpPose[] lastRolePoses = new MpPose[MpLimits.Members];
+    private readonly bool[] lastRoleDead = new bool[MpLimits.Members];
     private bool ownsNativeRun;
     private bool prepareSent;
     private bool localPrepared;
@@ -50,11 +58,24 @@ public sealed class MultiplayerSession : IDisposable
     public IReadOnlyList<LobbyMember> Members => roster;
     public bool IsHost => Identity?.IsHost == true;
     public bool Paused => game.Paused;
+    public RelayTransportStats TransportStats => transport.Stats;
     public event Action<Exception>? Faulted;
 
     // The member whose CheckRun/PrepareRun answer ended the host's start, kept for the
     // manager to surface once; LastError alone says "Busy" without who or why.
     private MemberRejection? pendingRejection;
+    // One-shot human notice for the manager to put in chat (member dropped mid-run, etc.).
+    private string? pendingNotice;
+    // Peers that joined while a run was in progress: their Hello is answered with the
+    // lobby only once the run ends, because members in Running refuse LobbyMessage.
+    private readonly List<(Guid PeerId, HelloMessage Hello)> deferredHellos = new();
+
+    public string? TakeNotice()
+    {
+        var notice = pendingNotice;
+        pendingNotice = null;
+        return notice;
+    }
 
     public MemberRejection? TakeRejection()
     {
@@ -78,19 +99,24 @@ public sealed class MultiplayerSession : IDisposable
             if (Identity == null && transport.Status == RelayStatus.Connected && transport.Identity is { } identity)
                 Initialize(identity);
             CaptureLocalPartyMarkers();
-            for (var n = 0; n < MpLimits.DrainPerTick && transport.TryReceive(out var item); n++)
+            var drainStart = Stopwatch.GetTimestamp();
+            for (var n = 0; n < MpLimits.DrainPerTickMax && transport.TryReceive(out var item); n++)
             {
                 if (item != null)
                     Receive(item, now);
                 if (disposed)
                     return;
+                if (Stopwatch.GetElapsedTime(drainStart).TotalMilliseconds >= MpLimits.DrainBudgetMilliseconds)
+                    break;
             }
             if (Identity != null && transport.Status is RelayStatus.Closed or RelayStatus.Disconnected)
             {
                 Close(MpError.TransportFailure);
                 return;
             }
-            if (Phase is MultiplayerPhase.Checking or MultiplayerPhase.Preparing or MultiplayerPhase.Running &&
+            // Checking/Preparing need the exact roster that was checked; Running tolerates
+            // joins/leaves (handled per event below) so one drop does not end the room.
+            if (Phase is MultiplayerPhase.Checking or MultiplayerPhase.Preparing &&
                 transport.MembershipGeneration != runMembershipGeneration)
                 EndForMembershipChange();
             if (Phase is MultiplayerPhase.Checking or MultiplayerPhase.Preparing && now >= deadline)
@@ -155,13 +181,24 @@ public sealed class MultiplayerSession : IDisposable
                 nextPoseSnapshot = nextPoseSnapshot == 0
                     ? now + interval
                     : nextPoseSnapshot + (Math.Floor((now - nextPoseSnapshot) / interval) + 1) * interval;
+                var keepalive = now >= nextPoseKeepalive;
                 if (IsHost)
                 {
-                    if (!Send(scope.RunId, game.CaptureRoles()))
+                    var roles = game.CaptureRoles();
+                    if (keepalive || RolePosesChanged(roles))
+                    {
+                        nextPoseKeepalive = now + 1d / MpLimits.SnapshotHz;
+                        if (!Send(scope.RunId, roles))
+                            return;
+                    }
+                }
+                else if (game.CaptureSelfPose() is { } pose && (keepalive || pose != lastSelfPose))
+                {
+                    nextPoseKeepalive = now + 1d / MpLimits.SnapshotHz;
+                    lastSelfPose = pose;
+                    if (!Send(scope.RunId, pose))
                         return;
                 }
-                else if (game.CaptureSelfPose() is { } pose && !Send(scope.RunId, pose))
-                    return;
             }
             if (!worldDue)
                 return;
@@ -178,6 +215,24 @@ public sealed class MultiplayerSession : IDisposable
             }
         }
         catch (Exception ex) { Fail(ex); }
+    }
+
+    // Pose / death are what needs PoseHz; statuses and HP ride the keepalive cadence.
+    private bool RolePosesChanged(RolesSnapshotMessage roles)
+    {
+        var changed = false;
+        foreach (var role in roles.Roles)
+        {
+            var i = (int)role.Role;
+            if ((uint)i >= (uint)lastRolePoses.Length) continue;
+            if (role.Pose != lastRolePoses[i] || role.Dead != lastRoleDead[i])
+            {
+                changed = true;
+                lastRolePoses[i] = role.Pose;
+                lastRoleDead[i] = role.Dead;
+            }
+        }
+        return changed;
     }
 
     public MpError ClaimRole(PartyRole role)
@@ -280,17 +335,30 @@ public sealed class MultiplayerSession : IDisposable
                 return;
             case RelayPeerJoined joined:
                 connected.Add(joined.PeerId);
-                if (Phase is MultiplayerPhase.Checking or MultiplayerPhase.Preparing or MultiplayerPhase.Running)
+                if (Phase is MultiplayerPhase.Checking or MultiplayerPhase.Preparing)
                     EndForMembershipChange();
                 return;
             case RelayPeerLeft left:
                 connected.Remove(left.PeerId);
+                var leftRole = members.TryGetValue(left.PeerId, out var leftMember) ? leftMember : null;
                 members.Remove(left.PeerId);
                 sequences.Remove(left.PeerId);
+                deferredHellos.RemoveAll(entry => entry.PeerId == left.PeerId);
                 if (left.PeerId == Identity.HostId)
                 { Close(MpError.HostDisconnected); return; }
-                if (Phase is MultiplayerPhase.Checking or MultiplayerPhase.Preparing or MultiplayerPhase.Running)
-                    EndForMembershipChange();
+                if (Phase is MultiplayerPhase.Checking or MultiplayerPhase.Preparing)
+                { EndForMembershipChange(); return; }
+                if (Phase == MultiplayerPhase.Running)
+                {
+                    // The run keeps going for everyone else; the host hands the slot to AI and
+                    // the peers keep rendering it from the host's roles snapshots.
+                    if (IsHost && leftRole?.Role is { } orphanRole)
+                    {
+                        game.OrphanRole(orphanRole);
+                        pendingNotice = $"成員「{leftRole.Alias}」（{orphanRole}）已離線，該位置改由 AI 接手，本場繼續。";
+                    }
+                    return;
+                }
                 if (IsHost)
                     PublishLobby();
                 return;
@@ -314,6 +382,14 @@ public sealed class MultiplayerSession : IDisposable
 
         switch (packet.Message)
         {
+            case HelloMessage hello when IsHost && Phase == MultiplayerPhase.Running:
+                // Admit after the run: members in Running reject lobby updates, and the
+                // joiner cannot enter a scenario that is already prepared.
+                if (!connected.Contains(packet.SenderId) || members.ContainsKey(packet.SenderId))
+                    throw new MpProtocolException(MpError.InvalidMessage);
+                deferredHellos.RemoveAll(entry => entry.PeerId == packet.SenderId);
+                deferredHellos.Add((packet.SenderId, hello));
+                return;
             case HelloMessage hello when IsHost && Phase is MultiplayerPhase.Lobby or MultiplayerPhase.Restoring:
                 if (!connected.Contains(packet.SenderId) || members.ContainsKey(packet.SenderId))
                     throw new MpProtocolException(MpError.InvalidMessage);
@@ -506,6 +582,10 @@ public sealed class MultiplayerSession : IDisposable
         lastPaused = game.Paused;
         nextSnapshot = 0;
         nextPoseSnapshot = 0;
+        nextPoseKeepalive = 0;
+        lastSelfPose = null;
+        Array.Clear(lastRolePoses);
+        Array.Clear(lastRoleDead);
         if (!host)
             CaptureLocalPartyMarkers();
     }
@@ -618,6 +698,26 @@ public sealed class MultiplayerSession : IDisposable
             game.EndRun(returnToInn);
         }
         Phase = game.IsRestoring ? MultiplayerPhase.Restoring : MultiplayerPhase.Lobby;
+        if (IsHost)
+            AdmitDeferredHellos();
+    }
+
+    // Run over: admit whoever joined meanwhile and republish the roster — members that
+    // dropped mid-run were removed without a lobby update (peers refuse it while Running).
+    private void AdmitDeferredHellos()
+    {
+        foreach (var (peerId, hello) in deferredHellos)
+        {
+            if (!connected.Contains(peerId) || members.ContainsKey(peerId)) continue;
+            if (hello.BuildFingerprint != game.BuildFingerprint)
+            {
+                Reject(peerId, MpError.BuildMismatch);
+                continue;
+            }
+            members.Add(peerId, new LobbyMember(peerId, hello.Alias, null, hello.BuildFingerprint));
+        }
+        deferredHellos.Clear();
+        PublishLobby();
     }
 
     private bool Send(Guid runId, MpMessage message)

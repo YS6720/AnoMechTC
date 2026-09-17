@@ -33,6 +33,7 @@ public interface IRelayTransport : IDisposable
     RelayStatus Status { get; }
     RelayIdentity? Identity { get; }
     long MembershipGeneration { get; }
+    RelayTransportStats Stats { get; }
     Task<MpError> ConnectAsync(RelayConnectionOptions options, CancellationToken cancellationToken);
     bool TrySend(Guid runId, MpMessage message);
     bool TryReceive(out RelayEvent? item);
@@ -59,6 +60,8 @@ public interface IMultiplayerGame
     void EndRun(bool returnToInn);
     SelfPoseMessage? CaptureSelfPose();
     void ApplySelfPose(PartyRole role, SelfPoseMessage pose);
+    /// <summary>Host only: the member owning this role left mid-run; hand the slot to AI.</summary>
+    void OrphanRole(PartyRole role);
     bool ApplyAbilityUse(PartyRole role, AbilityUseMessage ability);
     void ResetAbilityState();
     void GiveInvulnerability(PartyRole role);

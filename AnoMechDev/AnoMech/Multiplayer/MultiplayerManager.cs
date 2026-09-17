@@ -44,6 +44,9 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     public MultiplayerSession? Session { get; private set; }
     public bool HasSession => Session is { Phase: not MultiplayerPhase.Closed };
     public MpError LastError { get; private set; }
+    // Wall-clock of the last non-None error so the panel can say "斷線於 HH:mm:ss" instead
+    // of showing a stale reason with no idea when it happened.
+    public DateTime? LastErrorAt { get; private set; }
     public bool CanStart => Session is { IsHost: true, Phase: MultiplayerPhase.Lobby } && !game.NetworkIsRestoring;
     // Only the host, and only while its own run is live: the in-place end opens the
     // next run in the same room, either the same one again (retry) or the scenario
@@ -147,7 +150,7 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
         if (disposed) return;
         try
         {
-            for (var n = 0; n < MpLimits.DrainPerTick; n++)
+            for (var n = 0; n < MpLimits.DrainPerTickMax; n++)
             {
                 Action? command;
                 lock (commands) command = commands.Count == 0 ? null : commands.Dequeue();
@@ -205,6 +208,8 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     private void ObserveSession()
     {
         if (Session == null) return;
+        if (Session.TakeNotice() is { } notice)
+            ChatOutput.Coach($"[多人同步] {notice}");
         if (Session.TakeRejection() is { } rejection)
         {
             var who = rejection.Role is { } role ? $"{rejection.Alias}({role})" : rejection.Alias;
@@ -339,6 +344,7 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     {
         LastError = error;
         if (error == reportedError) return;
+        if (error != MpError.None) LastErrorAt = DateTime.Now;
         reportedError = error;
         if (error != MpError.None)
             ChatOutput.Error($"[多人同步] {error}；目前場次不會自動續接。");
@@ -447,6 +453,10 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
         puppet.ApplyNetworkPose(pose.Pose, pose.IsMoving, pose.IsActing);
     }
     public void GiveInvulnerability(PartyRole role) => game.World.Party.GiveInvuln(role);
+    public void OrphanRole(PartyRole role)
+    {
+        if (game.World.Party.Get(role) is SimNetworkPuppet puppet) puppet.Orphan();
+    }
     internal bool SubmitAbilityUse(uint actionId, byte classJob, byte level, SimCharacter? target)
     {
         if (Session is not { Phase: MultiplayerPhase.Running } session ||

@@ -1,3 +1,4 @@
+using System;
 using System.Numerics;
 using AnoMech.Core.Game.Party;
 using AnoMech.Multiplayer;
@@ -50,7 +51,9 @@ internal sealed class MultiplayerPanel(Plugin plugin)
         if (manager.ConnectionStatus.Length != 0)
             ImGui.TextWrapped(manager.ConnectionStatus);
         if (manager.LastError != MpError.None)
-            WrappedColored(Warn, ErrorText(manager.LastError));
+            WrappedColored(Warn, manager.LastErrorAt is { } at
+                ? $"{ErrorText(manager.LastError)}（{at:HH:mm:ss}）"
+                : ErrorText(manager.LastError));
         ImGui.Separator();
     }
 
@@ -64,6 +67,25 @@ internal sealed class MultiplayerPanel(Plugin plugin)
         ImGui.TextWrapped(session.Identity is { } identity
             ? $"房間：{identity.RoomCode}　你的身分：{role}"
             : $"你的身分：{role}");
+        DrawQuality(session.TransportStats);
+    }
+
+    // 連線品質一行：RTT（心跳來回，含本機佇列等待）、送出／接收佇列深度、略過的位置取樣。
+    // 顏色只看 RTT 與佇列：綠＝正常、黃＝開始堆積、紅＝快被判斷線。
+    private static void DrawQuality(RelayTransportStats stats)
+    {
+        var rtt = stats.RttMilliseconds < 0 ? "量測中" : $"{stats.RttMilliseconds:0} ms";
+        var sendPct = 100 * stats.SendQueueDepth / MpLimits.SendQueue;
+        var recvPct = 100 * stats.ReceiveQueueDepth / MpLimits.ReceiveQueue;
+        var worst = Math.Max(sendPct, recvPct);
+        var color = stats.RttMilliseconds > 1500 || worst >= 50 ? Warn
+            : stats.RttMilliseconds > 400 || worst >= 10 ? new Vector4(1f, 0.85f, 0.3f, 1f)
+            : Ok;
+        ImGui.TextColored(color,
+            $"連線品質：RTT {rtt}｜送出佇列 {stats.SendQueueDepth}｜接收佇列 {stats.ReceiveQueueDepth}" +
+            (stats.SkippedLatestState > 0 ? $"｜略過位置取樣 {stats.SkippedLatestState}" : ""));
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("RTT＝心跳經 relay 來回的時間，含本機送出佇列等待。\n佇列持續堆高＝這台電腦或網路跟不上；超過 12 秒沒收到任何訊息會被判斷線。\n略過位置取樣＝送不出去時丟掉舊位置、保留最新，不會斷線。");
     }
 
     // 繁中狀態字樣；enum 名稱只在診斷區出現。
