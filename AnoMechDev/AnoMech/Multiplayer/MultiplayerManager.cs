@@ -383,7 +383,11 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
         return ZoneSession.DescribePlayerBusy() is { } flag ? $"player-busy:{flag}" : "none";
     }
 
-    public MpError CheckRun(RunDescriptor descriptor)
+    public bool IsMomentarilyBusy => Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Jumping];
+
+    public MpError CheckRun(RunDescriptor descriptor) => CheckRun(descriptor, includeMomentary: true);
+
+    private MpError CheckRun(RunDescriptor descriptor, bool includeMomentary)
     {
         if (!MpValidation.Descriptor(descriptor)) return MpError.InvalidMessage;
         var scenario = game.Scenarios.SingleOrDefault(candidate => SceneKey(candidate) == descriptor.SceneKey);
@@ -396,7 +400,7 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
             descriptor.WaymarkIndex < 0 ||
             descriptor.WaymarkIndex >= Math.Max(1, scenario.Phase.Zone.WaymarkPresets.Count))
             return MpError.InvalidMessage;
-        if (game.NetworkIsRestoring || !ZoneSession.IsInInn() || ZoneSession.IsPlayerBusy()) return MpError.Busy;
+        if (game.NetworkIsRestoring || !ZoneSession.IsInInn() || ZoneSession.IsPlayerBusy(includeMomentary)) return MpError.Busy;
         if (!NativeCompatGate.CanEnterSimZone) return MpError.NativeFailure;
         var catalog = ResourcesFor(scene);
         if (!catalog.RuntimeDataAvailable) return MpError.UnsupportedResource;
@@ -413,7 +417,7 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     public MpError BeginPrepare(RunScope scope, RunDescriptor descriptor,
         IReadOnlyList<LobbyMember> roster, Guid localPeerId, bool host, Func<bool> isCurrent)
     {
-        var error = CheckRun(descriptor);
+        var error = CheckRun(descriptor, includeMomentary: false);
         if (error != MpError.None) return error;
         // CheckRun leaves exactly the approval it just verified; prepare consumes
         // that, never a fresh read of the file.

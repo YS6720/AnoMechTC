@@ -226,11 +226,15 @@ public sealed unsafe class ZoneSession : IDisposable
         ConditionFlag.Mounted, ConditionFlag.Jumping, ConditionFlag.Occupied,
     ];
 
-    public static bool IsPlayerBusy()
+    // includeMomentary=false: ignore states that clear by themselves within a second (a jump).
+    // The multiplayer prepare step uses that — by then the member already waited for landing
+    // once, and failing prepare on a fresh jump yanked every loaded member back to the inn
+    // (2026-09-17 22:47–22:50, three times in a two-man test).
+    public static bool IsPlayerBusy(bool includeMomentary = true)
     {
         var c = Plugin.Condition;
         foreach (var flag in BusyFlags)
-            if (c[flag]) return true;
+            if (c[flag] && (includeMomentary || flag != ConditionFlag.Jumping)) return true;
         return false;
     }
 

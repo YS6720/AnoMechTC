@@ -50,6 +50,12 @@ public interface IMultiplayerGame
     bool IsPrepared { get; }
     bool IsRestoring { get; }
     MpError CheckRun(RunDescriptor descriptor);
+    /// <summary>
+    /// A busy state that clears by itself within a second (mid-jump). The member holds its
+    /// CheckRun answer briefly instead of rejecting: 2026-09-17 a 7-man session logged 67
+    /// cancelled starts in 25 minutes, every one of them "player-busy:Jumping".
+    /// </summary>
+    bool IsMomentarilyBusy { get; }
     // Why CheckRun would answer Busy right now, as a short ASCII tag for the host's
     // diagnostics ("zone-restoring", "not-in-inn:1122", "player-busy:OccupiedInEvent").
     // A bare Busy on the host's screen names neither the member nor the gate.

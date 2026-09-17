@@ -14,8 +14,10 @@ internal sealed class MultiplayerPanel(Plugin plugin)
     private static readonly Vector4 Warn = new(1f, 0.8f, 0.2f, 1f);
     private static readonly Vector4 Muted = new(0.7f, 0.7f, 0.7f, 1f);
     private const string OutboundScope =
-        "外送範圍：自填別名、房間／場次識別、版本與場景摘要、分工、模擬位置及 HP／狀態／世界特效；不傳錄影檔、聊天、裝備或帳號資料。";
-    private string alias = "匿名";
+        "外送範圍：顯示名稱（預設為角色名，可改）、房間／場次識別、版本與場景摘要、分工、模擬位置及 HP／狀態／世界特效；不傳錄影檔、聊天、裝備、伺服器或帳號資料。";
+    // 預設帶入角色名：維護者 2026-09-17——大廳裡全是「匿名」「+」「3G」分不出誰是誰。
+    // 仍可自行改成別名；空白時下一幀會再帶回角色名。
+    private string alias = "";
     private string invitationText = "";
     private RoomInvitation? parsedInvitation;
     private string invitationError = "";
@@ -196,13 +198,19 @@ internal sealed class MultiplayerPanel(Plugin plugin)
     private void DrawConnectionEntry(MultiplayerManager manager)
     {
         EnsureHostGrantLoaded();
-        ImGui.InputText("顯示別名", ref alias, MpLimits.AliasCharacters);
+        if (alias.Length == 0 && Plugin.ObjectTable.LocalPlayer is { } localPlayer)
+            alias = localPlayer.Name.TextValue;
+        ImGui.InputText("顯示名稱", ref alias, MpLimits.AliasCharacters);
+        ImGui.SameLine();
+        ImGui.TextDisabled("(?)");
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("預設是你的角色名，方便隊友辨識；想用別名直接改。只在房間內顯示，不含伺服器。");
         var aliasOk = MpValidation.Alias(alias);
         if (!aliasOk)
-            WrappedColored(Warn, $"別名無效：請填寫非空白、不含控制字元，且不超過 {MpValidation.AliasUtf8Bytes} 個 UTF-8 位元組的名稱。超過長度會直接拒絕，不會自動截斷。");
-        if (ImGui.TreeNode("別名與資料外送說明"))
+            WrappedColored(Warn, $"名稱無效：請填寫非空白、不含控制字元，且不超過 {MpValidation.AliasUtf8Bytes} 個 UTF-8 位元組的名稱。超過長度會直接拒絕，不會自動截斷。");
+        if (ImGui.TreeNode("顯示名稱與資料外送說明"))
         {
-            ImGui.TextWrapped($"別名自行填寫，不會傳送角色名稱；上限 {MpValidation.AliasUtf8Bytes} 個 UTF-8 位元組（中文約 21 字）。");
+            ImGui.TextWrapped($"顯示名稱預設帶入角色名（可改成別名）；上限 {MpValidation.AliasUtf8Bytes} 個 UTF-8 位元組（中文約 21 字）。");
             ImGui.TextWrapped(OutboundScope);
             ImGui.TextWrapped("斷線不會自動續局，房主離線即關房。");
             ImGui.TreePop();

@@ -42,6 +42,15 @@ public sealed class MultiplayerSession : IDisposable
     private bool lastPaused;
     private RunStatusMessage? lastRunStatus;
     private bool disposed;
+    // Member-side: a CheckRun received mid-jump is answered once the jump ends (bounded).
+    // 4 s: a jump is ~0.7 s, but with eight people hopping the host's start lands mid-jump
+    // often; the host's Checking/Preparing deadline is 15 s so there is room to wait.
+    private const double MomentaryBusyWaitSeconds = 4;
+    private (Guid RunId, RunDescriptor Descriptor, double Deadline)? pendingCheck;
+    // Same for the prepare step: BeginPrepare re-runs the busy gate and throws Busy on a
+    // jump, and by then other members have already loaded the arena — the host's
+    // EndAsHost(returnToInn: true) yanked everyone back to the inn.
+    private (Guid RunId, double Deadline)? pendingPrepare;
 
     public MultiplayerSession(IRelayTransport transport, IMultiplayerGame game, string alias)
     {
@@ -113,6 +122,19 @@ public sealed class MultiplayerSession : IDisposable
             {
                 Close(MpError.TransportFailure);
                 return;
+            }
+            if (pendingCheck is { } held && (!game.IsMomentarilyBusy || now >= held.Deadline || scope.RunId != held.RunId))
+            {
+                pendingCheck = null;
+                if (scope.RunId == held.RunId && Phase == MultiplayerPhase.Checking)
+                    AnswerCheckRun(held.RunId, held.Descriptor, restoring: false);
+            }
+            if (pendingPrepare is { } heldPrepare &&
+                (!game.IsMomentarilyBusy || now >= heldPrepare.Deadline || scope.RunId != heldPrepare.RunId))
+            {
+                pendingPrepare = null;
+                if (scope.RunId == heldPrepare.RunId && Phase == MultiplayerPhase.Checking)
+                    PrepareLocal(now);
             }
             // Checking/Preparing need the exact roster that was checked; Running tolerates
             // joins/leaves (handled per event below) so one drop does not end the room.
@@ -429,16 +451,12 @@ public sealed class MultiplayerSession : IDisposable
                     throw new MpProtocolException(MpError.InvalidMessage);
                 var restoring = Phase == MultiplayerPhase.Restoring || game.IsRestoring;
                 BeginScope(packet.RunId, check.Descriptor, now);
-                var checkError = restoring ? MpError.Busy :
-                    members.Values.Any(m => m.Role == null) ? MpError.RoleRequired : game.CheckRun(check.Descriptor);
-                // The host only ever saw a bare "Busy"; say which gate closed so the
-                // host can tell "someone is still restoring" from "someone left the inn".
-                var detail = checkError != MpError.Busy ? null
-                    : Phase == MultiplayerPhase.Restoring ? "phase-restoring"
-                    : game.BusyDetail();
-                Send(packet.RunId, new CheckedRunMessage(checkError, MpValidation.Detail(detail) ? detail : null));
-                if (checkError != MpError.None)
-                    FinishLocal(false, checkError);
+                if (!restoring && game.IsMomentarilyBusy)
+                {
+                    pendingCheck = (packet.RunId, check.Descriptor, now + MomentaryBusyWaitSeconds);
+                    return;
+                }
+                AnswerCheckRun(packet.RunId, check.Descriptor, restoring);
                 return;
         }
 
@@ -456,10 +474,10 @@ public sealed class MultiplayerSession : IDisposable
                 { RecordRejection(packet.SenderId, checkedRun.Error, checkedRun.Detail); EndAsHost(false, checkedRun.Error); return; }
                 checkedPeers.Add(packet.SenderId);
                 if (checkedPeers.Count == members.Count)
-                    PrepareLocal(now);
+                    RequestPrepare(now);
                 break;
             case PrepareRunMessage when !IsHost && Phase == MultiplayerPhase.Checking:
-                PrepareLocal(now);
+                RequestPrepare(now);
                 break;
             case PreparedRunMessage prepared when IsHost && Phase == MultiplayerPhase.Preparing && prepareSent:
                 RequireMember(packet.SenderId);
@@ -526,8 +544,18 @@ public sealed class MultiplayerSession : IDisposable
         deadline = now + MpLimits.PrepareSeconds;
     }
 
+    // Mid-jump: hold the prepare step until landing (bounded) instead of failing it.
+    private void RequestPrepare(double now)
+    {
+        if (game.IsMomentarilyBusy)
+            pendingPrepare = (scope.RunId, now + MomentaryBusyWaitSeconds);
+        else
+            PrepareLocal(now);
+    }
+
     private void PrepareLocal(double now)
     {
+        pendingPrepare = null;
         Phase = MultiplayerPhase.Preparing;
         deadline = now + MpLimits.PrepareSeconds;
         var current = scope;
@@ -683,9 +711,26 @@ public sealed class MultiplayerSession : IDisposable
         FinishLocal(returnToInn, reason);
     }
 
+    private void AnswerCheckRun(Guid runId, RunDescriptor descriptor, bool restoring)
+    {
+        var checkError = restoring ? MpError.Busy :
+            members.Values.Any(m => m.Role == null) ? MpError.RoleRequired : game.CheckRun(descriptor);
+        // The host only ever saw a bare "Busy"; say which gate closed so the
+        // host can tell "someone is still restoring" from "someone left the inn".
+        var detail = checkError != MpError.Busy ? null
+            : Phase == MultiplayerPhase.Restoring ? "phase-restoring"
+            : game.BusyDetail();
+        if (!Send(runId, new CheckedRunMessage(checkError, MpValidation.Detail(detail) ? detail : null)))
+            return;
+        if (checkError != MpError.None)
+            FinishLocal(false, checkError);
+    }
+
     private void FinishLocal(bool returnToInn, MpError reason)
     {
         ++generation;
+        pendingCheck = null;
+        pendingPrepare = null;
         scope = default;
         descriptor = null;
         checkedPeers.Clear();

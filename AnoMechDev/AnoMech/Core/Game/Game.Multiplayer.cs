@@ -170,7 +170,7 @@ public sealed partial class Game
             scenarioState = GameScenarioState.Idle;
             return null;
         }
-        if (remoteRoles != null && (ZoneSession.IsPlayerBusy() || NetworkIsRestoring))
+        if (remoteRoles != null && (ZoneSession.IsPlayerBusy(includeMomentary: false) || NetworkIsRestoring))
             throw new MpProtocolException(MpError.Busy);
 
         CrashTrace.Log("B: NativeCompatGate");
