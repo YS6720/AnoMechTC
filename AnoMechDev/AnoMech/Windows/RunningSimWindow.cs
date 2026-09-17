@@ -26,6 +26,8 @@ internal sealed class RunningSimWindow : Window
     public override void PreOpenCheck()
         => IsOpen = plugin.Configuration.CompactSimulationControls && plugin.Game.World.Map.IsInInstance;
 
+    private bool showSelectors = true;
+
     public override void Draw()
     {
         var game = plugin.Game;
@@ -33,8 +35,35 @@ internal sealed class RunningSimWindow : Window
         ImGui.TextColored(running ? new Vector4(0.4f, 0.9f, 0.4f, 1f) : new Vector4(1f, 0.8f, 0.3f, 1f),
             running ? "練習進行中" : game.Paused ? "練習已暫停" : "尚未開始，選好場景後按「開始」即可練習");
         if (game.ActiveScenario is { } scenario)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled("｜");
+            ImGui.SameLine();
             ImGui.TextUnformatted(Game.DisplayName(scenario));
+        }
+        if (game.ConsecutiveWins > 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled($"｜連勝 {game.ConsecutiveWins}");
+        }
+        if (plugin.Multiplayer.HasSession && plugin.Multiplayer.Session is { } session)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(new Vector4(0.6f, 0.8f, 1f, 1f),
+                $"｜多人 {(session.IsHost ? "房主" : "成員")}・{session.Members.Count} 人");
+        }
+        ImGui.Separator();
+        // 場景／進度／打法／場標直接在小窗調，不必開完整面板（維護者 2026-09-17）。
+        if (ImGui.SmallButton(showSelectors ? "▾ 場景與打法" : "▸ 場景與打法")) showSelectors = !showSelectors;
+        if (showSelectors)
+        {
+            ImGui.Indent();
+            main.DrawQuickSelectors();
+            ImGui.Unindent();
+        }
+        ImGui.Separator();
         main.DrawRunControls();
+        ImGui.Separator();
         if (ImGui.Button("完整面板")) main.TogglePanel();
         if (BuildEdition.IsDeveloper)
         {

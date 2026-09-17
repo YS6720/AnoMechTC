@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Dalamud.Configuration;
 using System;
 using AnoMech.Core;
@@ -18,6 +19,11 @@ public class Configuration : IPluginConfiguration
     public bool CompactSimulationControls { get; set; } = true;
     // Scenario auto-retry is opt-in and only follows an explicit successful completion.
     public bool AutoRetry { get; set; } = false;
+
+    // 連戰：清單裡的場景完成後自動接下一個（維護者 2026-09-17：「P5 delta 完自動接 sigma 完自動接 omega」）。
+    // 每一項記場景型別與當時選的打法／標點／進度；清單走到底就停，若同時開「自動重試」則從頭再來。
+    public bool ChainEnabled { get; set; } = false;
+    public List<ScenarioChainEntry> Chain { get; set; } = new();
 
     // Only the profile path is persisted. The machine-local profile contains
     // public endpoint/process paths, never room tokens or Cloudflare credentials.
@@ -65,4 +71,14 @@ public class Configuration : IPluginConfiguration
     {
         Plugin.PluginInterface.SavePluginConfig(this);
     }
+}
+
+[Serializable]
+public sealed class ScenarioChainEntry
+{
+    public string ScenarioType { get; set; } = "";
+    public string ScenarioName { get; set; } = "";
+    public int? SelectedAi { get; set; }
+    public int SelectedWaymark { get; set; }
+    public string ProgressKey { get; set; } = "full";
 }

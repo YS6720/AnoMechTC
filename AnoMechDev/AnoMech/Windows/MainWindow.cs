@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Reflection;
@@ -142,27 +143,88 @@ public unsafe class MainWindow : Window, IDisposable
         _wasInInstance = inInstance;
     }
 
+    // 分頁：練習／多人連線／連戰／開發工具。多人連線以前是折疊區塊擠在最上方，
+    // 場景選單與設定要往下捲；改成分頁後每頁只做一件事，狀態帶常駐不受分頁影響。
     public override void Draw()
     {
         DrawInInstanceReloadWarning();
-        DrawTraceRow();
-        multiplayerPanel.Draw();
-        ImGui.Separator();
-
-        var leftWidth = _leftPanelOpen ? ScenarioPanelWidth() : 30f;
-
-        if (ImGui.BeginTable("##layout", 2, ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.SizingFixedFit))
+        DrawStatusStrip();
+        if (!ImGui.BeginTabBar("##main-tabs", ImGuiTabBarFlags.None)) return;
+        if (ImGui.BeginTabItem("練習"))
         {
-            ImGui.TableSetupColumn("##left", ImGuiTableColumnFlags.WidthFixed, leftWidth);
-            ImGui.TableSetupColumn("##right", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableNextRow();
-            ImGui.TableSetColumnIndex(0);
-            DrawScenariosPanel();
-            ImGui.TableSetColumnIndex(1);
-            DrawMainContent();
-            ImGui.EndTable();
+            DrawPracticeTab();
+            ImGui.EndTabItem();
         }
+        if (ImGui.BeginTabItem(plugin.Multiplayer.HasSession ? "多人連線 ●" : "多人連線"))
+        {
+            multiplayerPanel.Draw();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem(plugin.Configuration.ChainEnabled ? "連戰 ●" : "連戰"))
+        {
+            DrawChainControls(plugin.Game);
+            ImGui.EndTabItem();
+        }
+        ImGui.EndTabBar();
     }
+
+    private void DrawPracticeTab()
+    {
+        var leftWidth = _leftPanelOpen ? ScenarioPanelWidth() : 30f;
+        if (!ImGui.BeginTable("##layout", 2, ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.SizingFixedFit)) return;
+        ImGui.TableSetupColumn("##left", ImGuiTableColumnFlags.WidthFixed, leftWidth);
+        ImGui.TableSetupColumn("##right", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableNextRow();
+        ImGui.TableSetColumnIndex(0);
+        DrawScenariosPanel();
+        ImGui.TableSetColumnIndex(1);
+        DrawMainContent();
+        ImGui.EndTable();
+    }
+
+    // 常駐一行：場景狀態｜目前場景｜連勝｜多人房間。任何分頁都看得到，不用切回去確認。
+    private void DrawStatusStrip()
+    {
+        var game = plugin.Game;
+        var (label, color) = ScenarioStateLabel(game);
+        ImGui.TextColored(color, label);
+        if (game.ActiveScenario is { } active)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled("｜");
+            ImGui.SameLine();
+            ImGui.TextUnformatted(Game.DisplayName(active));
+        }
+        if (game.ConsecutiveWins > 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled($"｜連勝 {game.ConsecutiveWins}");
+        }
+        if (plugin.Multiplayer.HasSession && plugin.Multiplayer.Session is { } session)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled("｜");
+            ImGui.SameLine();
+            ImGui.TextColored(new Vector4(0.6f, 0.8f, 1f, 1f),
+                $"多人：{(session.IsHost ? "房主" : "成員")}・{session.Members.Count} 人・{session.Phase}");
+        }
+        else if (plugin.Multiplayer.IsConnecting)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled("｜多人：連線中…");
+        }
+        ImGui.Separator();
+    }
+
+    private static (string Label, Vector4 Color) ScenarioStateLabel(Game game) => game.ScenarioState switch
+    {
+        GameScenarioState.Preparing => ("準備中", new Vector4(1f, 0.8f, 0.2f, 1f)),
+        GameScenarioState.Running => ("執行中", new Vector4(0.4f, 1f, 0.6f, 1f)),
+        GameScenarioState.Paused => ("已暫停", new Vector4(1f, 0.8f, 0.2f, 1f)),
+        GameScenarioState.Completed => ("已完成", new Vector4(0.4f, 1f, 0.6f, 1f)),
+        GameScenarioState.Failed => ("已失誤", new Vector4(1f, 0.35f, 0.35f, 1f)),
+        _ => ("未開始", new Vector4(0.7f, 0.7f, 0.7f, 1f)),
+    };
 
     // 場景進行中卸載插件會走 ZoneSession.Revert(dispose:true)，那條路徑跳過所有安全延遲
     // （位置還原、Occupied 解除、防火牆關閉全部同一幀做完），與正常 Leave 不等價。
@@ -312,15 +374,7 @@ public unsafe class MainWindow : Window, IDisposable
 
     private static void DrawScenarioStatus(Game game)
     {
-        var (label, color) = game.ScenarioState switch
-        {
-            GameScenarioState.Preparing => ("準備中", new Vector4(1f, 0.8f, 0.2f, 1f)),
-            GameScenarioState.Running => ("執行中", new Vector4(0.4f, 1f, 0.6f, 1f)),
-            GameScenarioState.Paused => ("已暫停", new Vector4(1f, 0.8f, 0.2f, 1f)),
-            GameScenarioState.Completed => ("已完成", new Vector4(0.4f, 1f, 0.6f, 1f)),
-            GameScenarioState.Failed => ("已失誤", new Vector4(1f, 0.35f, 0.35f, 1f)),
-            _ => ("未開始", new Vector4(0.7f, 0.7f, 0.7f, 1f)),
-        };
+        var (label, color) = ScenarioStateLabel(game);
         ImGui.TextColored(color, $"狀態：{label}");
         if (game.ActiveProgressKey is { } progressKey)
         {
@@ -412,6 +466,8 @@ public unsafe class MainWindow : Window, IDisposable
         ImGui.EndDisabled();
         ImGui.SameLine();
         ImGui.TextDisabled("僅在明確成功後重開；失敗不會自動重試。");
+        if (plugin.Configuration.ChainEnabled)
+            ImGui.TextDisabled($"連戰已開（{plugin.Configuration.Chain.Count} 場，到「連戰」分頁調整）");
         if (game.ConsecutiveWins > 0)
         {
             ImGui.TextDisabled($"連勝：{game.ConsecutiveWins}");
@@ -427,6 +483,192 @@ public unsafe class MainWindow : Window, IDisposable
     // Drawn below the strat picker for scenarios that declare WaymarkPresets. _selectedWaymark
     // is the index passed to RunScenario on Start; changing it while a scenario is loaded
     // re-places the markers immediately (same live-feedback loop as the position readout).
+    // 連戰：清單裡的場景完成後自動接下一個。每一項記「加入當下」選的打法／標點／進度。
+    private void DrawChainControls(Game game)
+    {
+        var config = plugin.Configuration;
+        var hostGate = plugin.Multiplayer.HasSession && plugin.Multiplayer.Session?.IsHost != true;
+        ImGui.BeginDisabled(hostGate);
+        var chainEnabled = config.ChainEnabled;
+        if (ImGui.Checkbox("連戰（完成後自動接清單裡的下一個）", ref chainEnabled))
+        {
+            config.ChainEnabled = chainEnabled;
+            config.Save();
+            if (!chainEnabled && game.PendingIsChain) game.CancelPendingRetry();
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled(config.AutoRetry ? "清單走到底會從頭再來（自動重試已開）" : "清單走到底就停");
+        ImGui.Separator();
+
+        // 左：副本清單一鍵「＋」加入；右：清單每一項的打法／場標／進度直接在列上改。
+        // 不用切回「練習」分頁選好再回來（維護者 2026-09-17）。
+        if (ImGui.BeginTable("##chain-layout", 2, ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.SizingFixedFit))
+        {
+            ImGui.TableSetupColumn("##pick", ImGuiTableColumnFlags.WidthFixed, ScenarioPanelWidth() + 40f);
+            ImGui.TableSetupColumn("##list", ImGuiTableColumnFlags.WidthStretch);
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0);
+            DrawChainPicker(config);
+            ImGui.TableSetColumnIndex(1);
+            DrawChainList(game, config);
+            ImGui.EndTable();
+        }
+        ImGui.EndDisabled();
+    }
+
+    private void DrawChainPicker(Configuration config)
+    {
+        ImGui.TextUnformatted("加入副本");
+        ImGui.Separator();
+        var any = false;
+        foreach (var zone in plugin.Game.Zones)
+        {
+            if (!IsZoneVisible(zone)) continue;
+            any = true;
+            if (!ImGui.CollapsingHeader($"{zone.Name}##chain-zone", ImGuiTreeNodeFlags.DefaultOpen)) continue;
+            foreach (var phase in plugin.Game.PhasesOf(zone))
+                foreach (var scenario in plugin.Game.ScenariosOf(phase))
+                {
+                    if (scenario.AiStrats.Count == 0) continue;
+                    ImGui.PushID(scenario.Name);
+                    if (ImGui.SmallButton("＋"))
+                    {
+                        config.Chain.Add(new ScenarioChainEntry
+                        {
+                            ScenarioType = scenario.GetType().FullName ?? "",
+                            ScenarioName = scenario.Name,
+                            SelectedAi = 0,
+                            SelectedWaymark = 0,
+                            ProgressKey = scenario is IProgressScenario progress && progress.Progresses.Count > 0
+                                ? progress.Progresses[0].Key : "full",
+                        });
+                        config.Save();
+                    }
+                    ImGui.SameLine();
+                    ImGui.TextUnformatted(DisplayName(scenario));
+                    ImGui.PopID();
+                }
+        }
+        if (!any) ImGui.TextDisabled("沒有顯示中的副本，請從齒輪設定開啟。");
+    }
+
+    private void DrawChainList(Game game, Configuration config)
+    {
+        ImGui.TextUnformatted("連戰順序");
+        ImGui.SameLine();
+        ImGui.BeginDisabled(config.Chain.Count == 0);
+        if (ImGui.SmallButton("清空")) { config.Chain.Clear(); config.Save(); }
+        ImGui.EndDisabled();
+        ImGui.Separator();
+        if (config.Chain.Count == 0)
+        {
+            ImGui.TextDisabled("清單是空的：按左邊的「＋」加入副本，完成後會依這裡的順序自動接下一個。");
+            return;
+        }
+        for (var i = 0; i < config.Chain.Count; i++)
+        {
+            var entry = config.Chain[i];
+            var scenario = game.Scenarios.FirstOrDefault(s => s.GetType().FullName == entry.ScenarioType);
+            ImGui.PushID(i);
+            if (ImGui.SmallButton("×")) { config.Chain.RemoveAt(i); config.Save(); ImGui.PopID(); break; }
+            ImGui.SameLine();
+            ImGui.BeginDisabled(i == 0);
+            if (ImGui.SmallButton("↑")) { (config.Chain[i - 1], config.Chain[i]) = (config.Chain[i], config.Chain[i - 1]); config.Save(); }
+            ImGui.EndDisabled();
+            ImGui.SameLine();
+            ImGui.BeginDisabled(i == config.Chain.Count - 1);
+            if (ImGui.SmallButton("↓")) { (config.Chain[i + 1], config.Chain[i]) = (config.Chain[i], config.Chain[i + 1]); config.Save(); }
+            ImGui.EndDisabled();
+            ImGui.SameLine();
+            var active = game.ActiveScenario is { } a && a.GetType().FullName == entry.ScenarioType;
+            if (active) ImGui.TextColored(new Vector4(0.4f, 1f, 0.6f, 1f), $"{i + 1}. {entry.ScenarioName}");
+            else ImGui.TextUnformatted($"{i + 1}. {entry.ScenarioName}");
+            if (scenario is null)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(new Vector4(1f, 0.6f, 0.6f, 1f), "（找不到這個場景，請移除）");
+                ImGui.PopID();
+                continue;
+            }
+            ImGui.Indent(28f);
+            // 打法
+            var strats = BuildStratLabels(scenario.AiStrats);
+            if (strats.Length > 1)
+            {
+                var ai = Math.Clamp(entry.SelectedAi ?? 0, 0, strats.Length - 1);
+                ImGui.TextDisabled("打法");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(220);
+                if (ImGui.Combo("##ai", ref ai, strats, strats.Length)) { entry.SelectedAi = ai; config.Save(); }
+                ImGui.SameLine();
+            }
+            // 進度
+            if (scenario is IProgressScenario progress && progress.Progresses.Count > 1)
+            {
+                var keys = progress.Progresses;
+                var sel = 0;
+                for (var k = 0; k < keys.Count; k++) if (keys[k].Key == entry.ProgressKey) sel = k;
+                var names = new string[keys.Count];
+                for (var k = 0; k < keys.Count; k++) names[k] = keys[k].Name;
+                ImGui.TextDisabled("進度");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(160);
+                if (ImGui.Combo("##progress", ref sel, names, names.Length)) { entry.ProgressKey = keys[sel].Key; config.Save(); }
+                ImGui.SameLine();
+            }
+            // 場標
+            var presets = scenario.Phase.Zone.WaymarkPresets;
+            if (presets.Count > 1)
+            {
+                var wm = Math.Clamp(entry.SelectedWaymark, 0, presets.Count - 1);
+                var names = new string[presets.Count];
+                for (var k = 0; k < presets.Count; k++) names[k] = presets[k].Name;
+                ImGui.TextDisabled("場標");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(140);
+                if (ImGui.Combo("##wm", ref wm, names, names.Length)) { entry.SelectedWaymark = wm; config.Save(); }
+            }
+            ImGui.NewLine();
+            ImGui.Unindent(28f);
+            ImGui.PopID();
+        }
+    }
+
+    // 模擬中的精簡小窗：不用開完整面板就能換場景／進度／打法／場標。
+    // 場景 combo 依副本→階段分組；選擇走同一個 SelectScenario，與完整面板同步。
+    internal void DrawQuickSelectors()
+    {
+        var game = plugin.Game;
+        var hostGate = plugin.Multiplayer.HasSession && plugin.Multiplayer.Session?.IsHost != true;
+        ImGui.BeginDisabled(hostGate);
+        ImGui.TextUnformatted("場景：");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(260);
+        var current = _selectedScenario is { } s ? DisplayName(s) : "（未選擇）";
+        if (ImGui.BeginCombo("##quick-scenario", current))
+        {
+            foreach (var zone in game.Zones)
+            {
+                if (!IsZoneVisible(zone)) continue;
+                ImGui.TextDisabled(zone.Name);
+                foreach (var phase in game.PhasesOf(zone))
+                    foreach (var scenario in game.ScenariosOf(phase))
+                    {
+                        var selected = _selectedScenario == scenario;
+                        ImGui.PushID(scenario.Name);
+                        if (ImGui.Selectable(DisplayName(scenario), selected)) SelectScenario(scenario);
+                        if (selected) ImGui.SetItemDefaultFocus();
+                        ImGui.PopID();
+                    }
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.EndDisabled();
+        DrawProgressSelector();
+        DrawStratSelector();
+        DrawWaymarkSelector();
+    }
+
     private void DrawWaymarkSelector()
     {
         if (_selectedScenario is null) return;

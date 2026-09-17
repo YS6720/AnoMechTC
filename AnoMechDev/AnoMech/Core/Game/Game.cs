@@ -173,20 +173,25 @@ public sealed partial class Game : IDisposable
         ScenarioState is GameScenarioState.Running or GameScenarioState.Paused or
             GameScenarioState.Failed or GameScenarioState.Completed;
     internal ScenarioRunSnapshot? PendingRetry => pendingRetry;
+    // 連戰排下來的下一場：走與自動重試相同的 pendingRetry 管線（含多人房主換副本），
+    // 只是快照是清單裡的下一個場景，且不要求 AutoRetry 打開。
+    private bool pendingIsChain;
+    internal bool PendingIsChain => pendingIsChain;
     internal long ScenarioDispatchGeneration => scenarioDispatchGeneration;
     internal bool IsRetryInFlight(ScenarioRunSnapshot snapshot, long generation)
         => ReferenceEquals(retryInFlight, snapshot) &&
             retryInFlightGeneration == generation &&
-            ReferenceEquals(activeRun, snapshot) &&
+            (ReferenceEquals(activeRun, snapshot) || retryIsChain) &&
             scenarioState == GameScenarioState.Completed &&
             !Paused &&
-            AutoRetryEnabled &&
+            (AutoRetryEnabled || retryIsChain) &&
             RunInputsCurrent(snapshot);
     internal void CancelRetryDispatch(ScenarioRunSnapshot snapshot, long generation, bool resetStreak)
     {
         if (!ReferenceEquals(retryInFlight, snapshot) || retryInFlightGeneration != generation)
             return;
         retryInFlight = null;
+        retryIsChain = false;
         retryRemaining = 0f;
         if (resetStreak) ClearStreak();
     }
@@ -194,8 +199,9 @@ public sealed partial class Game : IDisposable
         => ReferenceEquals(retryInFlight, snapshot) &&
             retryInFlightGeneration == generation &&
             !Paused &&
-            AutoRetryEnabled &&
+            (AutoRetryEnabled || retryIsChain) &&
             RunInputsCurrent(snapshot);
+    private bool retryIsChain;
 
     // The scenario's own settings panel and the practice-position store are both
     // mutable while a run is loaded. A pending retry keeps the identity it was
@@ -435,6 +441,9 @@ public sealed partial class Game : IDisposable
     {
         pendingRetry = null;
         retryInFlight = null;
+        timelineDrainWaited = 0f;
+        retryIsChain = false;
+        pendingIsChain = false;
         retryRemaining = 0f;
         InvalidateQueuedScenarioWork();
         Multiplayer?.CancelPendingRetry();
@@ -513,6 +522,11 @@ public sealed partial class Game : IDisposable
     }
 
     private const float AutoRetryDelaySeconds = 2f;
+    // 場景在「檢定通過」那一刻就呼叫 CompleteScenario，但後面通常還排著收尾的施法／動畫／退場事件。
+    // 自動重試與連戰的倒數要等這些事件全部播完才開始，否則會在機制還沒演完就跳下一關
+    // （維護者 2026-09-17）。上限是保險：場景若掛著永不結束的週期事件，不會卡死。
+    private const float MaxTimelineDrainSeconds = 30f;
+    private float timelineDrainWaited;
 
     private void ObserveScenarioResult()
     {
@@ -544,23 +558,69 @@ public sealed partial class Game : IDisposable
             consecutiveWins = 1;
         }
 
+        if (TryQueueChainNext(activeRun)) return;
         if (AutoRetryEnabled)
         {
             pendingRetry = activeRun;
+            pendingIsChain = false;
             pendingRetryGeneration = scenarioDispatchGeneration;
             retryRemaining = AutoRetryDelaySeconds;
+            timelineDrainWaited = 0f;
         }
+    }
+
+    // 連戰：完成的場景在清單裡且還有下一個 → 把下一個排進 pendingRetry。清單走到底：
+    // 有開自動重試就從頭再來，否則停。角色沿用本場（多人由房主分工決定，不在快照裡改）。
+    private bool TryQueueChainNext(ScenarioRunSnapshot finished)
+    {
+        if (!Plugin.Config.ChainEnabled) return false;
+        var chain = Plugin.Config.Chain;
+        if (chain.Count == 0) return false;
+        var finishedType = finished.Scenario.GetType().FullName;
+        var index = chain.FindIndex(entry => entry.ScenarioType == finishedType);
+        if (index < 0) return false;
+        var nextIndex = index + 1;
+        if (nextIndex >= chain.Count)
+        {
+            if (!AutoRetryEnabled)
+            {
+                Core.ChatOutput.Coach("[AnoMech] 連戰完成（清單已走到底）。");
+                return true;
+            }
+            nextIndex = 0;
+        }
+        var entry = chain[nextIndex];
+        var scenario = Scenarios.FirstOrDefault(candidate => candidate.GetType().FullName == entry.ScenarioType);
+        if (scenario is null ||
+            !TryCreateRunSnapshot(scenario, finished.RoleOverride, entry.SelectedAi, entry.SelectedWaymark,
+                entry.ProgressKey, out var next))
+        {
+            Core.ChatOutput.Error($"[AnoMech] 連戰：找不到或無法啟動「{entry.ScenarioName}」，已停止。");
+            return true;
+        }
+        pendingRetry = next;
+        pendingIsChain = true;
+        pendingRetryGeneration = scenarioDispatchGeneration;
+        retryRemaining = AutoRetryDelaySeconds;
+        timelineDrainWaited = 0f;
+        Core.ChatOutput.Coach($"[AnoMech] 連戰：本場收尾播完後 {AutoRetryDelaySeconds:0} 秒接「{scenario.Name}」。");
+        return true;
     }
 
     private void AdvanceRetry(float deltaSeconds)
     {
-        if (!AutoRetryEnabled)
+        if (!AutoRetryEnabled && !pendingIsChain && !retryIsChain)
         {
             if (pendingRetry != null || retryInFlight != null) CancelPendingRetry();
             return;
         }
         if (pendingRetry is null || scenarioState != GameScenarioState.Completed || Paused)
             return;
+        if (Events.Pending > 0 && timelineDrainWaited < MaxTimelineDrainSeconds)
+        {
+            timelineDrainWaited += Math.Max(0f, deltaSeconds);
+            return;
+        }
         retryRemaining = Math.Max(0f, retryRemaining - Math.Max(0f, deltaSeconds));
         if (retryRemaining > 0f) return;
         if (!RunInputsCurrent(pendingRetry))
@@ -575,6 +635,8 @@ public sealed partial class Game : IDisposable
         var generation = pendingRetryGeneration;
         pendingRetry = null;
         retryInFlight = snapshot;
+        retryIsChain = pendingIsChain;
+        pendingIsChain = false;
         retryInFlightGeneration = generation;
         retryRemaining = 0f;
         if (Multiplayer?.HasSession == true)
@@ -589,6 +651,7 @@ public sealed partial class Game : IDisposable
             if (ReferenceEquals(retryInFlight, snapshot))
             {
                 retryInFlight = null;
+                retryIsChain = false;
                 retryRemaining = 0f;
                 ClearStreak();
                 Core.ChatOutput.Error("[AnoMech] 自動重試未能啟動，已停止連勝。");
@@ -597,6 +660,7 @@ public sealed partial class Game : IDisposable
         catch (Exception ex)
         {
             retryInFlight = null;
+            retryIsChain = false;
             ClearStreak();
             Core.ChatOutput.Error($"[AnoMech] 自動重試啟動失敗：{ex.GetType().Name}: {ex.Message}");
         }
@@ -608,6 +672,7 @@ public sealed partial class Game : IDisposable
         scenarioState = GameScenarioState.Failed;
         pendingRetry = null;
         retryInFlight = null;
+        retryIsChain = false;
         retryRemaining = 0f;
         ClearStreak();
     }

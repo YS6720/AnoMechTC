@@ -88,6 +88,7 @@ public static partial class TopP3HelloWorldRules
     public static class ActionId
     {
         public const uint HelloWorld = 31573;
+        public const uint LatentDefect = 31599;
         public const uint SynchronizationBug = 31574;
         public const uint OverflowBug = 31575;
         public const uint RedRot = 31578;
@@ -141,8 +142,14 @@ public static partial class TopP3HelloWorldRules
 
     public const float PreparationSeconds = 5f;
     public const float HelloWorldCastAt = 0f;
-    public const float HelloWorldCastSeconds = 4.971f;
+    // 錄製（2026-09-16）：31573 讀條 4.7s，結算在起手 +4.95s；讀條長度與結算分開記。
+    public const float HelloWorldCastSeconds = 4.7f;
     public const float InitialEffectAt = 4.971f;
+    public const float HelloWorldFireDelay = InitialEffectAt - HelloWorldCastSeconds;
+    // 塔（31583／31584）讀條 9.7s，結算 +9.96s（RoundTimes 的 TowerEffectAt − TowerCastAt ≈ 9.97）。
+    public const float TowerCastSeconds = 9.7f;
+    // boss 每輪同時讀條「潛在錯誤」（31599，8.7s）；錄製 24.14／45.16／66.24／87.33 起手＝各輪 TowerCastAt。
+    public const float LatentDefectCastSeconds = 8.7f;
     public const float InitialStatusAt = 4.984f;
     public const float InitialLineStatusAt = 5.084f;
     public const float InitialActiveStatusAt = 8.051f;
@@ -162,7 +169,8 @@ public static partial class TopP3HelloWorldRules
     public const float InitialNeedStackDuration = 68.987f;
     public const float InitialNeedDefamationDuration = 26.987f;
     public const float InitialActiveDuration = 26.958f;
-    public const float InitialLatentDuration = 20.958f;
+    // 錄製四輪 3435／3528 實測 9.876–9.992s；原 20.958 會讓潛在錯誤晚一輪到期。
+    public const float InitialLatentDuration = 9.94f;
 
     // Active mechanic expiry is tied to recorded AOE boundaries rather than a
     // guessed status duration. The timeline resolves a fixed event at this

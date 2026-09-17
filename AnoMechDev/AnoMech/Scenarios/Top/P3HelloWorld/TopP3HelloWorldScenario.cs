@@ -136,7 +136,7 @@ public sealed partial class TopP3HelloWorldScenario : IScenario, IScenarioPartyP
             targetLocation: Vector3.Zero,
             castSeconds: TopP3HelloWorldRules.HelloWorldCastSeconds,
             omenDelay: 0f,
-            fireDelay: 0f);
+            fireDelay: TopP3HelloWorldRules.HelloWorldFireDelay);
         ChatOutput.Coach("[AnoMech] 31573 Hello World —— 四輪練習開始");
     }
 
@@ -228,10 +228,15 @@ public sealed partial class TopP3HelloWorldScenario : IScenario, IScenarioPartyP
                     ? TopP3HelloWorldRules.ActionId.BlueTower
                     : TopP3HelloWorldRules.ActionId.RedTower,
                 targetLocation: tower.Center,
-                castSeconds: 10f,
+                castSeconds: TopP3HelloWorldRules.TowerCastSeconds,
                 omenDelay: 0f,
-                fireDelay: 0f);
+                fireDelay: TopP3HelloWorldRules.RoundTimes(round).TowerEffectAt
+                    - TopP3HelloWorldRules.RoundTimes(round).TowerCastAt
+                    - TopP3HelloWorldRules.TowerCastSeconds);
         }
+        boss?.Cast(TopP3HelloWorldRules.ActionId.LatentDefect,
+            castSeconds: TopP3HelloWorldRules.LatentDefectCastSeconds,
+            targetId: boss.GameObjectId);
         ChatOutput.Coach($"[AnoMech] R{round} 四塔出現 —— 每塔 1 人");
     }
 

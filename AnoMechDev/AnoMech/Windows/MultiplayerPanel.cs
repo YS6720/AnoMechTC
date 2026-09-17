@@ -27,10 +27,9 @@ internal sealed class MultiplayerPanel(Plugin plugin)
     private bool hostGrantLoaded;
 
     // Status/action first, details opt-in: the common path is "貼上邀請加入"，授權與外網設定屬少數人一次性設定。
+    // 現在是主視窗的「多人連線」分頁，不再是折疊區塊。
     public void Draw()
     {
-        if (!ImGui.CollapsingHeader("多人同步（TC Relay）"))
-            return;
         var manager = plugin.Multiplayer;
         var session = manager.Session;
         DrawStatus(manager, session);

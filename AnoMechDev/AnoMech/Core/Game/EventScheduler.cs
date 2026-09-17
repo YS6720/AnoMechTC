@@ -14,6 +14,8 @@ public sealed class EventScheduler
     private float elapsed;
 
     public float Time => elapsed;
+    /// <summary>Scheduled callbacks not yet fired. Zero means the timeline has fully played out.</summary>
+    public int Pending => entries.Count;
 
     public void Add(float offset, Action action)
         => AddAt(elapsed + MathF.Max(0f, offset), action);
