@@ -72,13 +72,14 @@ public interface IMultiplayerGame
     void ResetAbilityState();
     void GiveInvulnerability(PartyRole role);
     IReadOnlyList<PartyMarkerRequestMessage> CaptureLocalPartyMarkers();
-    void ApplyPartyMarker(PartyMarkerRequestMessage marker);
+    void ApplyPartyMarker(Guid sender, PartyMarkerRequestMessage marker);
     WorldSnapshotMessage CaptureWorld();
     RolesSnapshotMessage CaptureRoles();
     IReadOnlyList<WorldEvent> DrainEvents();
     RunStatusMessage CaptureRunStatus();
     WorldSnapshotMessage? TakeWorldAfterEvents();
-    void ApplyWorld(WorldSnapshotMessage snapshot);
+    /// <param name="ackedMarkerRequest">The host's last applied marker request id from this member.</param>
+    void ApplyWorld(WorldSnapshotMessage snapshot, long ackedMarkerRequest);
     void ApplyRoles(RolesSnapshotMessage snapshot);
     void ApplyEvent(WorldEvent item);
     void ApplyRunStatus(RunStatusMessage status);

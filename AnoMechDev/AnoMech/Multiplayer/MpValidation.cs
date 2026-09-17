@@ -120,7 +120,7 @@ public static class MpValidation
         PrepareRunMessage or CommitRunMessage or PauseMessage => true,
         EndRunMessage end => Error(end.Reason),
         ControlRequestMessage request => Enum.IsDefined(request.Control),
-        PartyMarkerRequestMessage marker => Enum.IsDefined(marker.Sign) &&
+        PartyMarkerRequestMessage marker => Enum.IsDefined(marker.Sign) && marker.RequestId >= 0 &&
             (marker.Role is not { } role || Role(role)),
         SelfPoseMessage pose => Pose(pose.Pose),
         AbilityUseMessage ability => ability.ActionId != 0 && ability.ClassJob != 0 &&

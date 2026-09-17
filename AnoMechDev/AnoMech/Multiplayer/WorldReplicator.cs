@@ -124,7 +124,7 @@ public sealed unsafe class WorldReplicator : IDisposable
         }
 
         var snapshot = eventBuffer.Capture(new WorldSnapshotMessage(enemies.ToArray(), eventObjects.ToArray(),
-            tethers.ToArray(), visuals.ToArray(), CapturePartyMarkers()));
+            tethers.ToArray(), visuals.ToArray(), CapturePartyMarkers(), markerAcks));
         if (!WorldValidation.Validate(snapshot)) throw Failure(MpError.InvalidMessage);
         foreach (var enemy in snapshot.Enemies)
             if (!resources.TryValidateEnemy(enemy)) throw Failure(MpError.UnsupportedResource);
@@ -183,7 +183,7 @@ public sealed unsafe class WorldReplicator : IDisposable
         return snapshot;
     }
 
-    public void ApplyWorld(WorldSnapshotMessage snapshot)
+    public void ApplyWorld(WorldSnapshotMessage snapshot, long ackedMarkerRequest)
     {
         EnsurePeer();
         EnsureCurrent();
@@ -197,7 +197,7 @@ public sealed unsafe class WorldReplicator : IDisposable
                 throw Failure(MpError.UnsupportedResource);
         foreach (var tether in snapshot.Tethers)
             if (!resources.HasTether(tether.TetherId)) throw Failure(MpError.UnsupportedResource);
-        ApplyPartyMarkers(snapshot.PartyMarkers);
+        ApplyPartyMarkers(snapshot.PartyMarkers, ackedMarkerRequest);
 
         var seenEnemies = new HashSet<int>();
         foreach (var state in snapshot.Enemies)
@@ -486,13 +486,32 @@ public sealed unsafe class WorldReplicator : IDisposable
         return changed;
     }
 
-    public void ApplyPartyMarker(PartyMarkerRequestMessage marker)
+    // Host: last applied marker request per member, echoed in every world snapshot.
+    private PartyMarkerAck[] markerAcks = Array.Empty<PartyMarkerAck>();
+
+    public void ApplyPartyMarker(Guid sender, PartyMarkerRequestMessage marker)
     {
         EnsureHost();
         EnsureCurrent();
         Span<ulong> party = stackalloc ulong[MpLimits.Members];
         GetPartyMarkerTargets(party);
         PartyMarkerSync.Apply(GetPartyMarkerSlots(), party, marker);
+        var index = Array.FindIndex(markerAcks, ack => ack.PeerId == sender);
+        var next = new PartyMarkerAck(sender, marker.RequestId);
+        if (index >= 0)
+        {
+            if (markerAcks[index].RequestId >= marker.RequestId) return;
+            var updated = (PartyMarkerAck[])markerAcks.Clone();
+            updated[index] = next;
+            markerAcks = updated;
+        }
+        else
+        {
+            var updated = new PartyMarkerAck[markerAcks.Length + 1];
+            markerAcks.CopyTo(updated, 0);
+            updated[^1] = next;
+            markerAcks = updated;
+        }
     }
 
     private void GetPartyMarkerTargets(Span<ulong> targets)
@@ -618,12 +637,13 @@ public sealed unsafe class WorldReplicator : IDisposable
             enemy.ApplyNetworkStatuses(state.Statuses, statusSourceResolver);
         });
     }
-    private void ApplyPartyMarkers(PartyMarkerState[] markers)
+    private void ApplyPartyMarkers(PartyMarkerState[] markers, long ackedMarkerRequest)
     {
         EnsureCurrent();
         Span<ulong> party = stackalloc ulong[MpLimits.Members];
         GetPartyMarkerTargets(party);
-        peerMarkerSync!.Reconcile(GetPartyMarkerSlots(), party, markers);
+        if (!peerMarkerSync!.Reconcile(GetPartyMarkerSlots(), party, markers, ackedMarkerRequest))
+            return;
         peerMarkers.Clear();
         foreach (var marker in markers)
             peerMarkers[marker.Sign] = party[(int)marker.Role];

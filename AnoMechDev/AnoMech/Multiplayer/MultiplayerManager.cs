@@ -477,12 +477,12 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     }
     public void ResetAbilityState() => game.Abilities.Reset();
     public IReadOnlyList<PartyMarkerRequestMessage> CaptureLocalPartyMarkers() => Replicator.CaptureLocalPartyMarkers();
-    public void ApplyPartyMarker(PartyMarkerRequestMessage marker) => Replicator.ApplyPartyMarker(marker);
+    public void ApplyPartyMarker(Guid sender, PartyMarkerRequestMessage marker) => Replicator.ApplyPartyMarker(sender, marker);
     public WorldSnapshotMessage CaptureWorld() => Replicator.CaptureWorld();
     public RolesSnapshotMessage CaptureRoles() => Replicator.CaptureRoles();
     public IReadOnlyList<WorldEvent> DrainEvents() => Replicator.DrainEvents();
     public WorldSnapshotMessage? TakeWorldAfterEvents() => Replicator.TakeWorldAfterEvents();
-    public void ApplyWorld(WorldSnapshotMessage snapshot) => Replicator.ApplyWorld(snapshot);
+    public void ApplyWorld(WorldSnapshotMessage snapshot, long ackedMarkerRequest) => Replicator.ApplyWorld(snapshot, ackedMarkerRequest);
     public void ApplyRoles(RolesSnapshotMessage snapshot) => Replicator.ApplyRoles(snapshot);
     public void ApplyEvent(WorldEvent item) => Replicator.ApplyEvent(item);
     public RunStatusMessage CaptureRunStatus() => game.CaptureRunStatus();

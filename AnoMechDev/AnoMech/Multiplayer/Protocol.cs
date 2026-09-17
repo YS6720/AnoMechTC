@@ -141,7 +141,11 @@ public sealed record EndRunMessage(bool ReturnToInn, MpError Reason) : MpMessage
 public sealed record PauseMessage(bool Paused) : MpMessage, IHostMessage, IRunMessage;
 public enum MpControl { Reset, Leave, GiveInvulnerability }
 public sealed record ControlRequestMessage(MpControl Control) : MpMessage, IPeerMessage, IRunMessage;
-public sealed record PartyMarkerRequestMessage(Sign Sign, PartyRole? Role) : MpMessage, IPeerMessage, IRunMessage;
+// RequestId: per-member monotonic counter. The host echoes the last applied id per member in
+// every world snapshot (PartyMarkerAcks); a member ignores a snapshot's marker table until it
+// covers its own latest request, so a pre-mark snapshot can never wipe a fresh local mark.
+public sealed record PartyMarkerRequestMessage(Sign Sign, PartyRole? Role, long RequestId = 0) : MpMessage, IPeerMessage, IRunMessage;
+public sealed record PartyMarkerAck(Guid PeerId, long RequestId);
 public sealed record SelfPoseMessage(MpPose Pose, bool IsMoving, bool IsActing) : MpMessage, IPeerMessage, IRunMessage, ILatestState;
 public sealed record AbilityUseMessage(uint ActionId, byte ClassJob, byte Level, MpEntity? Target)
     : MpMessage, IPeerMessage, IRunMessage;

@@ -8,7 +8,15 @@ namespace AnoMech.Multiplayer;
 // Native IDs stay local. Only resolved party roles leave this per-run input boundary.
 public sealed class PartyMarkerSync
 {
+    // Exact ordering instead of a time window: every local change carries a RequestId, the
+    // host echoes the last id it applied for us, and a snapshot whose ack is older than our
+    // latest request is simply not reconciled — its marker table predates what we placed.
+    // Before 2026-09-17 the 20 Hz snapshot overwrote a fresh local mark for a whole round
+    // trip ("跳標" when marking quickly).
     private readonly PartyRole?[] baseline = new PartyRole?[MpLimits.Markers];
+    private long lastRequestId;
+
+    public long LastRequestId => lastRequestId;
 
     public IReadOnlyList<PartyMarkerRequestMessage> Capture(ReadOnlySpan<ulong> signs, ReadOnlySpan<ulong> party)
     {
@@ -19,12 +27,14 @@ public sealed class PartyMarkerSync
             var previous = baseline[index];
             baseline[index] = role;
             if (role == previous) continue;
-            (changed ??= []).Add(new PartyMarkerRequestMessage((Sign)index, role));
+            (changed ??= []).Add(new PartyMarkerRequestMessage((Sign)index, role, ++lastRequestId));
         }
         return changed is null ? Array.Empty<PartyMarkerRequestMessage>() : changed;
     }
 
-    public void Reconcile(Span<ulong> signs, ReadOnlySpan<ulong> party, ReadOnlySpan<PartyMarkerState> authority)
+    /// <summary>Returns false when the snapshot predates our latest request and was skipped.</summary>
+    public bool Reconcile(Span<ulong> signs, ReadOnlySpan<ulong> party, ReadOnlySpan<PartyMarkerState> authority,
+        long ackedRequestId)
     {
         Span<PartyRole?> next = stackalloc PartyRole?[MpLimits.Markers];
         next.Clear();
@@ -33,6 +43,8 @@ public sealed class PartyMarkerSync
             if ((uint)party[(int)marker.Role] == 0) throw new MpProtocolException(MpError.RoleRequired);
             next[(int)marker.Sign] = marker.Role;
         }
+        if (ackedRequestId < lastRequestId)
+            return false;
         for (var index = 0; index < MpLimits.Markers; index++)
         {
             if (next[index] is { } role)
@@ -41,6 +53,7 @@ public sealed class PartyMarkerSync
                 signs[index] = 0;
             baseline[index] = next[index];
         }
+        return true;
     }
 
     public static void Apply(Span<ulong> signs, ReadOnlySpan<ulong> party, PartyMarkerRequestMessage marker)

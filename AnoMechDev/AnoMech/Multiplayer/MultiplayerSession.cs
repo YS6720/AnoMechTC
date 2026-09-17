@@ -510,10 +510,14 @@ public sealed class MultiplayerSession : IDisposable
                 break;
             case PartyMarkerRequestMessage marker when IsHost && Phase == MultiplayerPhase.Running:
                 RequireMember(packet.SenderId);
-                game.ApplyPartyMarker(marker);
+                game.ApplyPartyMarker(packet.SenderId, marker);
                 break;
             case WorldSnapshotMessage world when !IsHost && Phase == MultiplayerPhase.Running:
-                game.ApplyWorld(world);
+                var acked = 0L;
+                if (world.PartyMarkerAcks is { } acks)
+                    foreach (var ack in acks)
+                        if (ack.PeerId == identity.PeerId) { acked = ack.RequestId; break; }
+                game.ApplyWorld(world, acked);
                 break;
             case RolesSnapshotMessage roles when !IsHost && Phase == MultiplayerPhase.Running:
                 game.ApplyRoles(roles);

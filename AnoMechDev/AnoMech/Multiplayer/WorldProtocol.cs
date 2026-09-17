@@ -33,7 +33,8 @@ public sealed record StaticVisualState(int NetId, string ResourceKey, MpVector P
 
 public sealed record WorldSnapshotMessage(
     EnemyState[] Enemies, EventObjectState[] EventObjects, TetherState[] Tethers,
-    StaticVisualState[] StaticVisuals, PartyMarkerState[] PartyMarkers) : MpMessage, IHostMessage, IRunMessage, ILatestState;
+    StaticVisualState[] StaticVisuals, PartyMarkerState[] PartyMarkers,
+    PartyMarkerAck[]? PartyMarkerAcks = null) : MpMessage, IHostMessage, IRunMessage, ILatestState;
 public sealed record RolesSnapshotMessage(RoleState[] Roles) : MpMessage, IHostMessage, IRunMessage, ILatestState;
 public sealed record WorldEventMessage(WorldEvent Event) : MpMessage, IHostMessage, IRunMessage;
 

@@ -60,6 +60,14 @@ public static class WorldValidation
         }
         var markerRoles = new HashSet<PartyRole>();
         var markerSigns = new HashSet<Sign>();
+        if (message.PartyMarkerAcks is { } acks)
+        {
+            if (acks.Length > MpLimits.Members) return false;
+            var ackPeers = new HashSet<Guid>();
+            foreach (var ack in acks)
+                if (ack is null || ack.PeerId == Guid.Empty || ack.RequestId < 0 || !ackPeers.Add(ack.PeerId))
+                    return false;
+        }
         foreach (var marker in message.PartyMarkers)
             if (!ValidatePartyMarker(marker) || !markerRoles.Add(marker.Role) || !markerSigns.Add(marker.Sign))
                 return false;
