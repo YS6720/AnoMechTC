@@ -42,8 +42,11 @@ public static class MpLimits
     // 而 relay／cloudflared 的訊息量直接砍半。另外姿勢只在**有變化**時送（見
     // MultiplayerSession.AfterGameTick），靜止時降到 SnapshotHz 的 keepalive（2026-09-17）。
     public const int PoseHz = 60;
-    // ActionTimeline 的 row id 上限（實表約 5 千列）；套用前仍會查表，這只是線路層的粗界。
-    public const ushort TimelineIdMax = 9999;
+    // 動畫 id **不設線路上限**。2026-09-19 事故：原本猜 9999，實表是 25001 列、最大 row id
+    // 25000（乙太變移、跳擊這類位移技就在 9999 以上），於是那些技能一按，整房被自己的驗證
+    // 判為無效訊息而斷線。唯一守得住又不會過期的閘是**套用前查 ActionTimeline 表**
+    //（SimNetworkPuppet.IsKnownTimeline）——不存在的 id 永遠進不了原生呼叫，
+    // 而且會隨遊戲版本自動跟上。ushort 本身就是 0–65535 的邊界。
     public const int AliasCharacters = 64;
     public const int Enemies = 64;
     public const int EventObjects = 40;
