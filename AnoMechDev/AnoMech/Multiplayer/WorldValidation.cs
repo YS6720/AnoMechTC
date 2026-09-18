@@ -17,6 +17,7 @@ public static class WorldValidation
         {
             WorldSnapshotMessage world => ValidateWorld(world),
             RolesSnapshotMessage roles => ValidateRoles(roles),
+            PoseSnapshotMessage poses => ValidatePoses(poses),
             WorldEventMessage worldEvent => ValidateEventMessage(worldEvent),
             _ => true,
         };
@@ -104,12 +105,33 @@ public static class WorldValidation
             enemy.CurrentHp <= enemy.MaxHp;
     }
 
+    public static bool ValidatePoses(PoseSnapshotMessage message)
+    {
+        if (message is null || message.Poses is null || message.Poses.Length is 0 or > MpLimits.Members)
+            return false;
+        var seen = 0;
+        foreach (var pose in message.Poses)
+        {
+            if (!ValidateRolePose(pose)) return false;
+            var bit = 1 << (int)pose.Role;
+            if ((seen & bit) != 0) return false;   // 同一個角色出現兩次＝壞封包
+            seen |= bit;
+        }
+        return true;
+    }
+
+    public static bool ValidateRolePose(RolePoseState pose)
+        => pose is not null && Enum.IsDefined(pose.Role) && ValidatePose(pose.Pose) &&
+            pose.Timeline <= MpLimits.TimelineIdMax;
+
     public static bool ValidateRole(RoleState role)
     {
         return role is not null && Enum.IsDefined(role.Role) &&
             ValidatePose(role.Pose) &&
             ValidateStatuses(role.Statuses) &&
-            FiniteRange(role.HpFraction, 0f, 1f);
+            FiniteRange(role.HpFraction, 0f, 1f) &&
+            // 動畫 id 是遠端值，套用前還會再查 ActionTimeline 表；這裡只擋明顯超界。
+            role.Timeline <= MpLimits.TimelineIdMax;
     }
     public static bool ValidatePartyMarker(PartyMarkerState marker)
         => marker is not null && Enum.IsDefined(marker.Role) && Enum.IsDefined(marker.Sign);

@@ -48,6 +48,26 @@ public static class NetworkPartyIdentity
     }
 
     /// <summary>
+    /// 與 <see cref="Project"/> 同一條投影，但取的是外觀：把名冊映到八個角色槽的
+    /// <see cref="MpAppearance"/>。沒人佔的槽、或外觀驗不過的成員，留 null＝用既有 preset。
+    /// </summary>
+    public static MpAppearance?[] ProjectAppearance(IReadOnlyList<LobbyMember> roster)
+    {
+        ArgumentNullException.ThrowIfNull(roster);
+        var appearances = new MpAppearance?[Slots];
+        for (var i = 0; i < roster.Count; i++)
+        {
+            var member = roster[i];
+            if (member?.Role is not { } role || (uint)role >= Slots) continue;
+            // 這裡只做與遊戲資料無關的結構檢查；race／tribe 存在與否在套用前由
+            // PlayerAppearance.IsValid 再驗一次（PartyCreator.Spawn）。
+            if (member.Appearance is not { } appearance || !MpValidation.Appearance(appearance)) continue;
+            appearances[(int)role] ??= appearance;
+        }
+        return appearances;
+    }
+
+    /// <summary>
     /// Encodes <paramref name="name"/> as NUL-terminated UTF-8 into a fixed name buffer,
     /// zeroing the remainder so a longer previous occupant cannot leak. Returns false and
     /// leaves <paramref name="destination"/> untouched when the encoded name does not fit

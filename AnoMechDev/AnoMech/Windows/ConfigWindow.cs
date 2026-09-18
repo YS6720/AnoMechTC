@@ -134,6 +134,17 @@ public class ConfigWindow : Window, IDisposable
             configuration.Save();
         }
 
+        var showRanges = configuration.ShowHitRanges;
+        if (ImGui.Checkbox("顯示判定範圍（練習用）", ref showRanges))
+        {
+            configuration.ShowHitRanges = showRanges;
+            configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把每次傷害判定實際用到的範圍畫成外框，判定當下顯示 2 秒：\n" +
+                "有人被判中是紅色、沒人中是黃色。原本就有地面預警的招式不受影響，\n" +
+                "只是多一層外框；沒有預警的招式這樣才看得到真正的判定範圍。");
+
         ImGui.Separator();
         DrawScenarioVisibility();
 

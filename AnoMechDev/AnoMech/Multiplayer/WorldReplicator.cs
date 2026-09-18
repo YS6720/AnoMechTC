@@ -151,7 +151,7 @@ public sealed unsafe class WorldReplicator : IDisposable
             var (health, maxHealth) = ReadHealth(member);
             var hpFraction = maxHealth == 0 ? 0f : Math.Clamp((float)health / maxHealth, 0f, 1f);
             roles[i] = new RoleState(role, partyMember.Dead, pose,
-                CaptureStatuses(member), hpFraction);
+                CaptureStatuses(member), hpFraction, member.CurrentActionTimeline);
         }
         var snapshot = new RolesSnapshotMessage(roles);
         if (!WorldValidation.Validate(snapshot)) throw Failure(MpError.InvalidMessage);
@@ -239,6 +239,80 @@ public sealed unsafe class WorldReplicator : IDisposable
         RemoveStale(peerTethers, seenTethers, tether => NativeCall(tether.Despawn));
     }
 
+    /// <summary>
+    /// 60 Hz 的輕量取樣：位置、朝向、生死、動畫，沒有狀態列與 HP。呼叫端只送**變動的**角色。
+    /// </summary>
+    public RolePoseState[] CapturePoses()
+    {
+        EnsureHost();
+        EnsureCurrent();
+        var poses = new RolePoseState[MpLimits.Members];
+        for (var i = 0; i < poses.Length; i++)
+        {
+            EnsureCurrent();
+            var role = (PartyRole)i;
+            var member = world.Party.Get(role);
+            if (member is not ISimPartyMember partyMember)
+                throw Failure(MpError.PrepareFailed);
+            var pose = member is SimPlayer player
+                ? player.SampleNetworkPose().Pose
+                : new MpPose(MpVector.From(member.Position), member.Rotation);
+            poses[i] = new RolePoseState(role, partyMember.Dead, pose, member.CurrentActionTimeline);
+        }
+        return poses;
+    }
+
+    /// <summary>
+    /// 套用 60 Hz 取樣。只碰位置／朝向／動畫／生死；狀態與 HP 由 20 Hz 的完整快照負責，
+    /// 所以這裡丟掉一則不會讓任何狀態過期。
+    /// </summary>
+    public void ApplyPoses(PoseSnapshotMessage snapshot)
+    {
+        EnsurePeer();
+        EnsureCurrent();
+        if (!WorldValidation.Validate(snapshot))
+            throw Failure(MpError.InvalidMessage);
+
+        foreach (var state in snapshot.Poses)
+        {
+            EnsureCurrent();
+            var member = world.Party.Get(state.Role);
+            if (member is not ISimPartyMember partyMember)
+                throw Failure(MpError.RoleRequired);
+
+            NativeCall(() =>
+            {
+                if (state.Role != localRole)
+                {
+                    if (member is SimNetworkPuppet puppet)
+                        puppet.ApplyNetworkPose(state.Pose, moving: false, acting: false, timeline: state.Timeline);
+                    else
+                    {
+                        member.SetPosition(state.Pose.Position.ToVector());
+                        member.SetRotation(state.Pose.Rotation);
+                    }
+                }
+
+                // 生死同樣走 60 Hz：倒地的回饋不能等到下一個完整快照。
+                if (member is SimPlayer player)
+                {
+                    if (state.Dead != player.Dead)
+                        player.ApplyNetworkState(state.Dead, state.Dead ? 0f : 1f);
+                }
+                else if (state.Dead)
+                {
+                    if (!partyMember.Dead) partyMember.OnKilled();
+                }
+                else if (partyMember.Dead)
+                {
+                    if (member is SimNetworkPuppet revivedPuppet) revivedPuppet.RestoreNetworkAlive();
+                    else if (member is SimPartyNpc npc) npc.Revive();
+                    else throw Failure(MpError.NativeFailure);
+                }
+            });
+        }
+    }
+
     public void ApplyRoles(RolesSnapshotMessage snapshot)
     {
         EnsurePeer();
@@ -260,7 +334,7 @@ public sealed unsafe class WorldReplicator : IDisposable
                 if (state.Role != localRole)
                 {
                 if (member is SimNetworkPuppet puppet)
-                    puppet.ApplyNetworkPose(state.Pose, moving: false, acting: false);
+                    puppet.ApplyNetworkPose(state.Pose, moving: false, acting: false, timeline: state.Timeline);
                 else
                 {
                     member.SetPosition(state.Pose.Position.ToVector());

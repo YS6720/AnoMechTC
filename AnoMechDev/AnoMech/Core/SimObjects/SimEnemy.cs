@@ -5,6 +5,7 @@ using AnoMech.Pointers;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
+using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
 using Lumina.Excel.Sheets;
 using System;
 using System.Collections.Generic;
@@ -309,6 +310,10 @@ public sealed unsafe class SimEnemy : SimNpc
     public override void Despawn()
     {
         Movement.Follow(null);
+        // 先把武器（角色 DrawObject 的子物件）收掉再刪本體：native 刪除不保證回收它們，
+        // 玩家會看到「敵人消失了，杖／斧還插在原地」（維護者 2026-09-18 死刻實測）。
+        var chara = BattleCharaPtr;
+        if (chara != null) SetWeaponsVisible(chara, false);
         cast.Despawn();
         base.Despawn();
     }
@@ -408,9 +413,23 @@ public sealed unsafe class SimEnemy : SimNpc
         {
             var w = chara->DrawData.WeaponData[s].DrawObject;
             // 2026-09-02 實測這條路徑關不掉武器（維護者：「還是一樣」）。診斷結論（9/16 撤除）：
-            // 三個槽位的 DrawObject 指標一律為空（draw=0x0 model=0）——武器不在 WeaponData 底下，
-            // 不是旗標寫了沒用。人型騎士已改走 Despawn 繞開（DsrP5Wrath）。
+            // 三個槽位的 DrawObject 指標一律為空（draw=0x0 model=0）——武器不在 WeaponData 底下。
             if (w != null && w->IsVisible != visible) w->IsVisible = visible;
+        }
+        // 武器真正掛的地方＝角色 DrawObject 的**子物件環狀鏈**（Object.ChildObject →
+        // NextSiblingObject，繞回頭）。只關角色那一個，杖／斧就留在原地不動
+        //（維護者 2026-09-18 死刻：隱形的格里諾／努德內留下武器；退場的演員也一樣）。
+        var draw = chara->DrawObject;
+        if (draw == null) return;
+        var child = draw->Object.ChildObject;
+        if (child == null) return;
+        var first = child;
+        for (var guard = 0; guard < 16; guard++)
+        {
+            var childDraw = (DrawObject*)child;
+            if (childDraw->IsVisible != visible) childDraw->IsVisible = visible;
+            child = child->NextSiblingObject;
+            if (child == null || child == first) break;
         }
     }
 

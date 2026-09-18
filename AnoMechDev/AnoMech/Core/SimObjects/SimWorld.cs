@@ -289,6 +289,7 @@ public sealed class SimWorld : ISimObject, IDisposable
         IReadOnlyList<PartyMemberPreset?>? presetOverride = null,
         IReadOnlySet<PartyRole>? remoteRoles = null,
         IReadOnlyList<string?>? aliasNames = null,
+        IReadOnlyList<Multiplayer.MpAppearance?>? appearances = null,
         Func<bool>? isCurrent = null)
     {
         var party = new SimParty();
@@ -304,6 +305,7 @@ public sealed class SimWorld : ISimObject, IDisposable
                 presetOverride,
                 remoteRoles,
                 aliasNames,
+                appearances,
                 isCurrent);
         }
         catch

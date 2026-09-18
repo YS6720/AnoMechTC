@@ -14,6 +14,8 @@ public class Configuration : IPluginConfiguration
     public bool OpenSimMenuOnInn { get; set; } = true;
     public bool OpenSimMenuOnSupportedInstanceSolo { get; set; } = false;
     public bool EnableEventLogging { get; set; } = false;
+    // 判定範圍顯示：把每次傷害判定實際用到的範圍畫出來（沒有原生預警的招式才看得出來）。
+    public bool ShowHitRanges { get; set; } = false;
 
     // 模擬區預設使用精簡操作列；完整面板仍可隨時開啟。只新增偏好，不改既有值。
     public bool CompactSimulationControls { get; set; } = true;
@@ -33,6 +35,11 @@ public class Configuration : IPluginConfiguration
     // 共用 Relay 的開房授權：只有使用者主動匯入時才寫入，內容是 Windows DPAPI（CurrentUser）密文。
     // 不存明文、不從既有欄位遷移或覆寫；解密失敗一律要求重新匯入，不回落任何明文來源。
     public string MultiplayerHostGrantProtected { get; set; } = "";
+
+    // 連線練習時把自己的**原版**外觀（customize＋五件裝備＋雙手武器）送給同房隊友，
+    // 讓替身長得像本人。Penumbra／Glamourer 的改造不在其中。進房時取一次，
+    // 之後換裝不會同步；關掉就完全不送。
+    public bool MultiplayerShareAppearance { get; set; } = true;
 
     // 只在練習模擬小隊期間搬動 _PartyList 每列的原生 row node；預設關閉。
     // 新欄位只由 property initializer 提供首次設定預設值，reload 不覆寫使用者選擇。

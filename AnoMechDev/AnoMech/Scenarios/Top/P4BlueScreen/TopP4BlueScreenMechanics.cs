@@ -162,8 +162,11 @@ public sealed class TopP4BlueScreenMechanics(SimWorld world, TopP4BlueScreenStat
         Plugin.Log.Info($"[AnoMech] {reason}");
     }
 
+    // SnapshotPosition, not Position: the game reads the position slightly before the omen
+    // ends, so stepping in at the last moment is still safe (維護者 2026-09-18）。
     private Vector2?[] Snapshot() => Enumerable.Range(0, 8).Select(i =>
-        world.Party.Get(i) is { } member && member.IsAlive() ? (Vector2?)new Vector2(member.Position.X, member.Position.Z) : null).ToArray();
+        world.Party.Get(i) is { } member && member.IsAlive()
+            ? (Vector2?)new Vector2(member.SnapshotPosition.X, member.SnapshotPosition.Z) : null).ToArray();
 
     private void Fail(bool[] failures, string cause)
     {

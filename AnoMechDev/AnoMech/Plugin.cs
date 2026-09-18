@@ -38,6 +38,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
+    [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
 
     private const string CommandName = "/anomech";
     private const string CommandAlias = "/ano";
@@ -61,6 +62,7 @@ public sealed class Plugin : IDalamudPlugin
     private ConfigWindow ConfigWindow { get; init; }
     private MainWindow MainWindow { get; init; }
     private RunningSimWindow RunningSimWindow { get; init; }
+    private HitRangeOverlay HitRangeOverlay { get; init; }
     internal PositionEditorWindow? PositionEditorWindow { get; init; }
     internal NpcCollectorWindow? NpcCollectorWindow { get; init; }
 
@@ -84,6 +86,7 @@ public sealed class Plugin : IDalamudPlugin
         ConfigWindow = new ConfigWindow(this);
         MainWindow = new MainWindow(this);
         RunningSimWindow = new RunningSimWindow(this, MainWindow);
+        HitRangeOverlay = new HitRangeOverlay(this);
 
         if (BuildEdition.IsDeveloper)
         {
@@ -94,6 +97,7 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.AddWindow(ConfigWindow);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(RunningSimWindow);
+        WindowSystem.AddWindow(HitRangeOverlay);
         if (PositionEditorWindow is { } positionEditorWindow)
             WindowSystem.AddWindow(positionEditorWindow);
         if (NpcCollectorWindow is { } npcCollectorWindow)

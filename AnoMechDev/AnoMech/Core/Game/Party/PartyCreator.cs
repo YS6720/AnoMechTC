@@ -53,6 +53,7 @@ internal static unsafe class PartyCreator
         IReadOnlyList<PartyMemberPreset?>? presetOverride = null,
         IReadOnlySet<PartyRole>? remoteRoles = null,
         IReadOnlyList<string?>? aliasNames = null,
+        IReadOnlyList<AnoMech.Multiplayer.MpAppearance?>? appearances = null,
         Func<bool>? isCurrent = null)
     {
         var presets = presetOverride
@@ -77,6 +78,8 @@ internal static unsafe class PartyCreator
         }
         if (aliasNames != null && aliasNames.Count != 8)
             throw new ArgumentException("Alias projection must cover exactly eight role slots.", nameof(aliasNames));
+        if (appearances != null && appearances.Count != 8)
+            throw new ArgumentException("Appearance projection must cover exactly eight role slots.", nameof(appearances));
         var itemSheet = Plugin.DataManager.GetExcelSheet<Item>();
 
         for (int i = 0; i < presets.Count; i++)
@@ -113,7 +116,7 @@ internal static unsafe class PartyCreator
             var facingPlayer = MathF.Atan2(-localPos.X, -localPos.Z);
 
             var member = Spawn(preset, alias ?? preset.Name, world, role, new Placement(localPos, facingPlayer),
-                itemSheet, remoteRoles?.Contains(role) == true, isCurrent);
+                itemSheet, remoteRoles?.Contains(role) == true, appearances?[i], isCurrent);
             if (member != null)
                 party.SetSlot(role, member);
             else if (remoteRoles != null)
@@ -122,7 +125,8 @@ internal static unsafe class PartyCreator
     }
 
     private static ISimPartyMember? Spawn(PartyMemberPreset preset, string displayName, SimWorld world,
-        PartyRole role, Placement placement, ExcelSheet<Item> itemSheet, bool remote, Func<bool>? isCurrent)
+        PartyRole role, Placement placement, ExcelSheet<Item> itemSheet, bool remote,
+        AnoMech.Multiplayer.MpAppearance? appearance, Func<bool>? isCurrent)
     {
         if (isCurrent?.Invoke() == false)
             throw new AnoMech.Multiplayer.MpProtocolException(AnoMech.Multiplayer.MpError.Cancelled);
@@ -147,8 +151,17 @@ internal static unsafe class PartyCreator
             chara->ModelContainer.ModelCharaId = 0;
             chara->ModelContainer.ModelSkeletonId = 0;
 
-            WriteCustomize(chara);
-            WriteEquipment(chara, preset, itemSheet);
+            // 真人外觀（連線且該成員有送、且驗得過）優先；否則沿用 Lalafell preset。
+            // 只在這裡套一次——run 中換外觀＝換骨架，要全重繪。
+            if (appearance != null && PlayerAppearance.IsValid(appearance))
+            {
+                PlayerAppearance.Apply(chara, appearance);
+            }
+            else
+            {
+                WriteCustomize(chara);
+                WriteEquipment(chara, preset, itemSheet);
+            }
             WriteName(gameObj, displayName);
             obj->RenderFlags = 0;
 

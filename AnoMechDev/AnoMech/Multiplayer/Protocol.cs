@@ -10,7 +10,7 @@ namespace AnoMech.Multiplayer;
 // never accepted from the application payload. No compatibility fallback.
 public static class MpLimits
 {
-    public const int ProtocolVersion = 7;
+    public const int ProtocolVersion = 9;
     public const string ProtocolName = "anomech-tc";
     public const int Members = 8;
     public const int Rooms = 4;
@@ -42,6 +42,8 @@ public static class MpLimits
     // 而 relay／cloudflared 的訊息量直接砍半。另外姿勢只在**有變化**時送（見
     // MultiplayerSession.AfterGameTick），靜止時降到 SnapshotHz 的 keepalive（2026-09-17）。
     public const int PoseHz = 60;
+    // ActionTimeline 的 row id 上限（實表約 5 千列）；套用前仍會查表，這只是線路層的粗界。
+    public const ushort TimelineIdMax = 9999;
     public const int AliasCharacters = 64;
     public const int Enemies = 64;
     public const int EventObjects = 40;
@@ -94,7 +96,18 @@ public readonly record struct MpQuaternion(float X, float Y, float Z, float W)
 
 public readonly record struct MpPose(MpVector Position, float Rotation);
 public readonly record struct RunScope(Guid RoomId, Guid RunId, long Generation);
-public sealed record LobbyMember(Guid PeerId, string Alias, PartyRole? Role, string BuildFingerprint);
+public sealed record LobbyMember(Guid PeerId, string Alias, PartyRole? Role, string BuildFingerprint,
+    MpAppearance? Appearance = null);
+
+// 真人外觀（原版）。**一次性**：跟著 hello／lobby 走，不進 run 迴圈，也不得塞進
+// RolesSnapshotMessage——那是 20 Hz 週期送的，常數級資料放進去會變成持續流量。
+// 整包約 62 bytes（customize 21 ＋ 裝備 20 ＋ 雙手 16 ＋ 兩個 float 8）。
+// Customize 欄位順序＝PlayerAppearance 的常數，不可重排。
+public sealed record MpAppearance(
+    byte[] Customize, ulong[] Equipment, ulong MainHand, ulong OffHand, float Height, float VfxScale)
+{
+    public const int EquipmentSlots = 5;
+}
 // Host-side only (never on the wire): which member's CheckRun/PrepareRun answer ended a start.
 public sealed record MemberRejection(string Alias, PartyRole? Role, MpError Error, string? Detail);
 public sealed record RunDescriptor(
@@ -119,6 +132,7 @@ public sealed record RunDescriptor(
 [JsonDerivedType(typeof(AbilityUseMessage), "ability")]
 [JsonDerivedType(typeof(WorldSnapshotMessage), "world")]
 [JsonDerivedType(typeof(RolesSnapshotMessage), "roles")]
+[JsonDerivedType(typeof(PoseSnapshotMessage), "poses")]
 [JsonDerivedType(typeof(WorldEventMessage), "event")]
 [JsonDerivedType(typeof(RunStatusMessage), "run-status")]
 public abstract record MpMessage;
@@ -128,7 +142,8 @@ public interface IPeerMessage;
 public interface IRunMessage;
 public interface ILatestState;
 
-public sealed record HelloMessage(string Alias, string BuildFingerprint) : MpMessage, IPeerMessage;
+public sealed record HelloMessage(string Alias, string BuildFingerprint, MpAppearance? Appearance = null)
+    : MpMessage, IPeerMessage;
 public sealed record LobbyMessage(LobbyMember[] Members) : MpMessage, IHostMessage;
 public sealed record ClaimRoleMessage(PartyRole Role) : MpMessage, IPeerMessage;
 public sealed record RejectedMessage(Guid RecipientId, MpError Error) : MpMessage, IHostMessage;
@@ -146,7 +161,12 @@ public sealed record ControlRequestMessage(MpControl Control) : MpMessage, IPeer
 // covers its own latest request, so a pre-mark snapshot can never wipe a fresh local mark.
 public sealed record PartyMarkerRequestMessage(Sign Sign, PartyRole? Role, long RequestId = 0) : MpMessage, IPeerMessage, IRunMessage;
 public sealed record PartyMarkerAck(Guid PeerId, long RequestId);
-public sealed record SelfPoseMessage(MpPose Pose, bool IsMoving, bool IsActing) : MpMessage, IPeerMessage, IRunMessage, ILatestState;
+// Timeline＝擁有者**當下實際播放**的 base ActionTimeline（slot 0）。先前替身只會用
+// 位移猜「跑／站」兩種，走路、跳躍、衝刺、情感動作一律變成跑步或滑行
+//（維護者 2026-09-18：「移動 走路 跳躍 都很卡，沒有正常的動畫」）。
+// 改成直接搬擁有者的動畫 id，替身播什麼由來源端決定。
+public sealed record SelfPoseMessage(MpPose Pose, bool IsMoving, bool IsActing, ushort Timeline = 0)
+    : MpMessage, IPeerMessage, IRunMessage, ILatestState;
 public sealed record AbilityUseMessage(uint ActionId, byte ClassJob, byte Level, MpEntity? Target)
     : MpMessage, IPeerMessage, IRunMessage;
 

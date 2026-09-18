@@ -511,6 +511,7 @@ public sealed partial class Game : IDisposable
         }
         Events.Tick(deltaSeconds * EventTimeScale);
         World.Tick(deltaSeconds);
+        HitRangeDebug.Tick(deltaSeconds);
         Abilities.Tick(deltaSeconds);
         if (activeScenario != null)
         {

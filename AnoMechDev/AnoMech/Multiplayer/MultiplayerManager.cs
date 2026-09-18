@@ -450,11 +450,15 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
         }
     }
     public SelfPoseMessage? CaptureSelfPose() => game.Player?.SampleNetworkPose(sampleActivity: true);
+
+    // 設定關閉＝連自己的外觀都不送（隊友看到的就是原本的 preset 替身）。
+    public MpAppearance? LocalAppearance
+        => Plugin.Config.MultiplayerShareAppearance ? Core.Game.Party.PlayerAppearance.Capture() : null;
     public void ApplySelfPose(PartyRole role, SelfPoseMessage pose)
     {
         if (!MpValidation.Validate(pose) || game.World.Party.Get(role) is not SimNetworkPuppet puppet)
             throw new MpProtocolException(MpError.InvalidMessage);
-        puppet.ApplyNetworkPose(pose.Pose, pose.IsMoving, pose.IsActing);
+        puppet.ApplyNetworkPose(pose.Pose, pose.IsMoving, pose.IsActing, pose.Timeline);
     }
     public void GiveInvulnerability(PartyRole role) => game.World.Party.GiveInvuln(role);
     public void OrphanRole(PartyRole role)
@@ -479,10 +483,12 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     public IReadOnlyList<PartyMarkerRequestMessage> CaptureLocalPartyMarkers() => Replicator.CaptureLocalPartyMarkers();
     public void ApplyPartyMarker(Guid sender, PartyMarkerRequestMessage marker) => Replicator.ApplyPartyMarker(sender, marker);
     public WorldSnapshotMessage CaptureWorld() => Replicator.CaptureWorld();
+    public RolePoseState[] CapturePoses() => Replicator.CapturePoses();
     public RolesSnapshotMessage CaptureRoles() => Replicator.CaptureRoles();
     public IReadOnlyList<WorldEvent> DrainEvents() => Replicator.DrainEvents();
     public WorldSnapshotMessage? TakeWorldAfterEvents() => Replicator.TakeWorldAfterEvents();
     public void ApplyWorld(WorldSnapshotMessage snapshot, long ackedMarkerRequest) => Replicator.ApplyWorld(snapshot, ackedMarkerRequest);
+    public void ApplyPoses(PoseSnapshotMessage snapshot) => Replicator.ApplyPoses(snapshot);
     public void ApplyRoles(RolesSnapshotMessage snapshot) => Replicator.ApplyRoles(snapshot);
     public void ApplyEvent(WorldEvent item) => Replicator.ApplyEvent(item);
     public RunStatusMessage CaptureRunStatus() => game.CaptureRunStatus();

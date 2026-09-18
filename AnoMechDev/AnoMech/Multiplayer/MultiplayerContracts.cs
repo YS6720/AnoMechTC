@@ -65,6 +65,11 @@ public interface IMultiplayerGame
     MpError Commit(RunScope scope, bool host);
     void EndRun(bool returnToInn);
     SelfPoseMessage? CaptureSelfPose();
+    /// <summary>
+    /// 本機玩家的原版外觀，設定關閉或讀不到角色時為 null。**只在進房時取一次**：
+    /// 它跟著 hello／lobby 走，不進 run 迴圈。
+    /// </summary>
+    MpAppearance? LocalAppearance { get; }
     void ApplySelfPose(PartyRole role, SelfPoseMessage pose);
     /// <summary>Host only: the member owning this role left mid-run; hand the slot to AI.</summary>
     void OrphanRole(PartyRole role);
@@ -75,12 +80,15 @@ public interface IMultiplayerGame
     void ApplyPartyMarker(Guid sender, PartyMarkerRequestMessage marker);
     WorldSnapshotMessage CaptureWorld();
     RolesSnapshotMessage CaptureRoles();
+    /// <summary>60 Hz 的輕量取樣（位置／朝向／生死／動畫），不含狀態列與 HP。</summary>
+    RolePoseState[] CapturePoses();
     IReadOnlyList<WorldEvent> DrainEvents();
     RunStatusMessage CaptureRunStatus();
     WorldSnapshotMessage? TakeWorldAfterEvents();
     /// <param name="ackedMarkerRequest">The host's last applied marker request id from this member.</param>
     void ApplyWorld(WorldSnapshotMessage snapshot, long ackedMarkerRequest);
     void ApplyRoles(RolesSnapshotMessage snapshot);
+    void ApplyPoses(PoseSnapshotMessage snapshot);
     void ApplyEvent(WorldEvent item);
     void ApplyRunStatus(RunStatusMessage status);
 }

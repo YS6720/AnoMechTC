@@ -14,7 +14,7 @@ public sealed class TopP5OmegaState
     private readonly Rng rng = new();
     
     public RoleList HelloWorldTargets { get; }
-    public RoleList DoubleDynamicTargets { get; }
+    public RoleList DoubleDynamicTargets { get; private set; }
 
     public IReadOnlyList<Direction> AttackDirections { get; }
     public IReadOnlyList<OmegaAttack> OmegaAttacks { get; } 
@@ -71,6 +71,28 @@ public sealed class TopP5OmegaState
             if (overrides is { SecondFAttack: not null, SecondMAttack: not null }) break;
         }
         OmegaAttacks = [firstFAttack, firstMAttack, secondFAttack, secondMAttack];
+    }
+
+    /// <summary>
+    /// 真副本的第二目標**至少有一個是潛能量高漲 2 層**（兩個都是 2 層也會出現）。
+    /// 原本兩份名單各自獨立亂數，會擲出「兩個第二目標都只有 1 層」的盤面——實戰沒有這種盤。
+    /// 修法＝出現 0 重疊時，把其中一個第二目標換進 2 層名單（換掉一個非第二目標的 2 層）；
+    /// 自然擲出 1 個或 2 個重疊的盤面不動，所以「兩個都 2 層」的機率維持原樣。
+    /// 回傳是否動過名單。
+    /// </summary>
+    public bool EnsureSecondTargetHasDoubleDynamis()
+    {
+        var second1 = HelloWorldTargets[2];
+        var second2 = HelloWorldTargets[3];
+        if (DoubleDynamicTargets.Contains(second1) || DoubleDynamicTargets.Contains(second2))
+            return false;
+
+        var promoted = rng.NextObj(second1, second2);
+        var doubles = DoubleDynamicTargets.List;
+        var demoted = rng.NextInt(doubles.Length);
+        doubles[demoted] = promoted;
+        DoubleDynamicTargets = new RoleList(DoubleDynamicTargets.Party, doubles);
+        return true;
     }
 
     private OmegaAttack RandomFAttack() => rng.NextObj(OmegaAttack.Legs, OmegaAttack.Staff);

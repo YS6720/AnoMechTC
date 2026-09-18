@@ -12,6 +12,9 @@ namespace AnoMech.Core.Game;
 // (south); forward vector = (sin, 0, cos).
 public sealed class CharacterFind<T> where T : IPositioned
 {
+    // Hit tests (Inside*/Outside*) read IPositioned.SnapshotPosition: the game snapshots an
+    // AoE slightly before its omen ends, so entering at the last moment is still safe.
+    // Targeting helpers (Closest/Farest/OnSideN/…) keep using the live position.
     private readonly Func<IEnumerable<T>> source;
 
     internal CharacterFind(Func<IEnumerable<T>> source) => this.source = source;
@@ -25,10 +28,11 @@ public sealed class CharacterFind<T> where T : IPositioned
         var hits = new List<T>();
         foreach (var m in source())
         {
-            var dx = m.Position.X - center.X;
-            var dz = m.Position.Z - center.Z;
+            var dx = m.SnapshotPosition.X - center.X;
+            var dz = m.SnapshotPosition.Z - center.Z;
             if (dx * dx + dz * dz <= rSq) hits.Add(m);
         }
+        HitRangeDebug.Record(HitRangeShape.Circle, center, 0f, radius, 0f, hits.Count > 0);
         return hits;
     }
 
@@ -43,8 +47,8 @@ public sealed class CharacterFind<T> where T : IPositioned
         var hits = new List<T>();
         foreach (var m in source())
         {
-            var dx = m.Position.X - origin.Position.X;
-            var dz = m.Position.Z - origin.Position.Z;
+            var dx = m.SnapshotPosition.X - origin.Position.X;
+            var dz = m.SnapshotPosition.Z - origin.Position.Z;
             var distSq = dx * dx + dz * dz;
             if (distSq > lenSq) continue;
             if (distSq < 0.0001f) { hits.Add(m); continue; }
@@ -52,6 +56,8 @@ public sealed class CharacterFind<T> where T : IPositioned
             var cos = (dx * forwardX + dz * forwardZ) / dist;
             if (cos >= cosHalf) hits.Add(m);
         }
+        HitRangeDebug.Record(HitRangeShape.Cone, origin.Position, origin.Rotation,
+            halfAngleRad, length, hits.Count > 0);
         return hits;
     }
 
@@ -68,13 +74,15 @@ public sealed class CharacterFind<T> where T : IPositioned
         var hits = new List<T>();
         foreach (var m in source())
         {
-            var dx = m.Position.X - origin.Position.X;
-            var dz = m.Position.Z - origin.Position.Z;
+            var dx = m.SnapshotPosition.X - origin.Position.X;
+            var dz = m.SnapshotPosition.Z - origin.Position.Z;
             var fwd = dx * forwardX + dz * forwardZ;
             if (fwd < 0f || fwd > length) continue;
             var side = dx * rightX + dz * rightZ;
             if (MathF.Abs(side) <= halfWidth) hits.Add(m);
         }
+        HitRangeDebug.Record(HitRangeShape.Rect, origin.Position, origin.Rotation,
+            halfWidth, length, hits.Count > 0);
         return hits;
     }
 
@@ -93,10 +101,12 @@ public sealed class CharacterFind<T> where T : IPositioned
         var hits = new List<T>();
         foreach (var m in source())
         {
-            var dx = m.Position.X - center.X;
-            var dz = m.Position.Z - center.Z;
+            var dx = m.SnapshotPosition.X - center.X;
+            var dz = m.SnapshotPosition.Z - center.Z;
             if (dx * dx + dz * dz > rSq) hits.Add(m);
         }
+        // An "outside" rule is still judged against this circle: draw the safe area.
+        HitRangeDebug.Record(HitRangeShape.Circle, center, 0f, radius, 0f, hits.Count > 0);
         return hits;
     }
 
@@ -109,11 +119,12 @@ public sealed class CharacterFind<T> where T : IPositioned
         var hits = new List<T>();
         foreach (var m in source())
         {
-            var dx = m.Position.X - center.X;
-            var dz = m.Position.Z - center.Z;
+            var dx = m.SnapshotPosition.X - center.X;
+            var dz = m.SnapshotPosition.Z - center.Z;
             var d = dx * dx + dz * dz;
             if (d > innerSq && d <= outerSq) hits.Add(m);
         }
+        HitRangeDebug.Record(HitRangeShape.Ring, center, 0f, innerRadius, outerRadius, hits.Count > 0);
         return hits;
     }
 
@@ -129,14 +140,16 @@ public sealed class CharacterFind<T> where T : IPositioned
         var hits = new List<T>();
         foreach (var m in source())
         {
-            var dx = m.Position.X - origin.Position.X;
-            var dz = m.Position.Z - origin.Position.Z;
+            var dx = m.SnapshotPosition.X - origin.Position.X;
+            var dz = m.SnapshotPosition.Z - origin.Position.Z;
             var fwd  = dx * forwardX + dz * forwardZ;
             var side = dx * rightX   + dz * rightZ;
             var inForwardArm = MathF.Abs(fwd)  <= halfLength && MathF.Abs(side) <= halfWidth;
             var inSideArm    = MathF.Abs(side) <= halfLength && MathF.Abs(fwd)  <= halfWidth;
             if (inForwardArm || inSideArm) hits.Add(m);
         }
+        HitRangeDebug.Record(HitRangeShape.Cross, origin.Position, origin.Rotation,
+            halfWidth, halfLength, hits.Count > 0);
         return hits;
     }
 
@@ -232,6 +245,7 @@ public sealed class CharacterFind<T> where T : IPositioned
             Plugin.Log.Warning($"InsideActionAoe: action {actionId} not found");
             return Array.Empty<T>();
         }
+        HitRangeDebug.NextLabel = $"{actionId} {action.Name}";
         var range = (float)action.EffectRange;
         var halfWidth = action.XAxisModifier > 0 ? action.XAxisModifier * 0.5f : range;
         var forward = new Placement(target.Position, target.Rotation + omenRotate);

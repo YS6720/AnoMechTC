@@ -38,26 +38,16 @@ internal struct NetworkPoseSmoother
     // of drawing a streak across the arena.
     public const float TeleportDistanceSquared = 4f;
 
-    // 1 cm of travel per sample: below this the owner is standing still.
-    public const float LocomotionDistanceSquared = 0.0001f;
-
-    // Animation grace follows display time, not packet frequency. At 30 FPS a
-    // 25 ms hold would expire every frame despite continuously arriving poses.
-    // Preserve the existing 50 ms grace while position interpolation runs faster.
-    public const float LocomotionHoldSeconds = 0.05f;
-
+    // 動畫不再由位移猜（2026-09-18）：擁有者送出自己實際在播的 ActionTimeline，
+    // 走路／跑步／跳躍／情感動作各自是不同的 id，位移只能猜出「跑或站」兩種。
     private Vector3 target;
     private float targetRotation;
     private float remainingSeconds;
-    private float locomotionHold;
     private bool started;
 
     // Pose to show. Only meaningful once a sample has been accepted.
     public Vector3 Position { get; private set; }
     public float Rotation { get; private set; }
-
-    // True while the character should be playing its run clip.
-    public bool Locomotion => locomotionHold > 0f;
 
     /// <summary>
     /// Takes a new authoritative sample. Returns true when the display was snapped
@@ -80,8 +70,6 @@ internal struct NetworkPoseSmoother
         target = position;
         targetRotation = normalizedRotation;
         remainingSeconds = InterpolationWindowSeconds;
-        if (travelSquared > LocomotionDistanceSquared)
-            locomotionHold = LocomotionHoldSeconds;
         return false;
     }
 
@@ -92,7 +80,6 @@ internal struct NetworkPoseSmoother
         target = Position = position;
         targetRotation = Rotation = MathUtil.NormalizeRotation(rotation);
         remainingSeconds = 0f;
-        locomotionHold = 0f;
     }
 
     /// <summary>
@@ -104,9 +91,6 @@ internal struct NetworkPoseSmoother
         // Also rejects NaN: nothing is done unless time actually passed.
         if (!started || !(deltaSeconds > 0f))
             return false;
-
-        if (locomotionHold > 0f)
-            locomotionHold = MathF.Max(0f, locomotionHold - deltaSeconds);
 
         if (remainingSeconds <= 0f)
             return false;
