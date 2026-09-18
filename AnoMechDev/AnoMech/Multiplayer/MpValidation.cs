@@ -146,7 +146,7 @@ public static class MpValidation
         ControlRequestMessage request => Enum.IsDefined(request.Control),
         PartyMarkerRequestMessage marker => Enum.IsDefined(marker.Sign) && marker.RequestId >= 0 &&
             (marker.Role is not { } role || Role(role)),
-        SelfPoseMessage pose => Pose(pose.Pose),
+        SelfPoseMessage pose => Pose(pose.Pose) && pose.Timeline <= MpLimits.TimelineIdMax,
         AbilityUseMessage ability => ability.ActionId != 0 && ability.ClassJob != 0 &&
             ability.Level is >= 1 and <= 100 &&
             (ability.Target is not { } target || WorldValidation.ValidateEntity(target)),
@@ -154,7 +154,8 @@ public static class MpValidation
             status.ConsecutiveWins is >= 0 and <= MpLimits.Streak &&
             Finite(status.RetrySeconds) &&
             status.RetrySeconds >= 0f && status.RetrySeconds <= MpLimits.RetryDisplaySeconds,
-        WorldSnapshotMessage or RolesSnapshotMessage or WorldEventMessage => WorldValidation.Validate(message),
+        WorldSnapshotMessage or RolesSnapshotMessage or PoseSnapshotMessage or WorldEventMessage
+            => WorldValidation.Validate(message),
         _ => false,
     };
 }
