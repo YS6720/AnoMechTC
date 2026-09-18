@@ -96,8 +96,11 @@ public sealed partial class Game
         // shows the same alias on the same role regardless of who joined first or which
         // slot is locally owned. Only names are projected; the scenario preset keeps its
         // job / equipment / level and the local slot stays null.
+        // 外觀與別名走同一份凍結名冊（PeerId → Role → Appearance），所以每個客戶端
+        // 在同一個角色上看到同一張臉。驗不過的成員留 null＝沿用既有 preset 外觀。
         networkPrepared = PrepareScenarioWorld(snapshot, remoteRoles, !host, isCurrent,
-            () => networkOwnsWorld = true, NetworkPartyIdentity.Project(roster));
+            () => networkOwnsWorld = true, NetworkPartyIdentity.Project(roster),
+            NetworkPartyIdentity.ProjectAppearance(roster));
         return networkPrepared == null ? MpError.PrepareFailed : MpError.None;
     }
 
@@ -147,7 +150,8 @@ public sealed partial class Game
 
     private PreparedScenario? PrepareScenarioWorld(ScenarioRunSnapshot snapshot,
         IReadOnlySet<PartyRole>? remoteRoles = null, bool peer = false, Func<bool>? isCurrent = null,
-        Action? acquireWorld = null, IReadOnlyList<string?>? aliasNames = null)
+        Action? acquireWorld = null, IReadOnlyList<string?>? aliasNames = null,
+        IReadOnlyList<MpAppearance?>? appearances = null)
     {
         EnsureNetworkScope(isCurrent);
         if (NetworkIsRestoring)
@@ -224,7 +228,8 @@ public sealed partial class Game
         EnsureNetworkScope(isCurrent);
         CrashTrace.Log("K: CreateParty");
         var presetOverride = (scenario as IScenarioPartyPreset)?.GetPartyPreset(player.ClassJob.RowId, roleOverride, solo);
-        World.CreateParty(player.ClassJob.RowId, roleOverride, solo, presetOverride, remoteRoles, aliasNames, isCurrent);
+        World.CreateParty(player.ClassJob.RowId, roleOverride, solo, presetOverride, remoteRoles, aliasNames,
+            appearances, isCurrent);
         EnsureNetworkScope(isCurrent);
         if (!peer)
         {

@@ -26,7 +26,14 @@ public sealed record EnemyState(
     byte ModelState, byte ModeAttributeFlags, MpPose Pose, StatusState[] Statuses,
     uint CurrentHp, uint MaxHp);
 public sealed record PartyMarkerState(PartyRole Role, Sign Sign);
-public sealed record RoleState(PartyRole Role, bool Dead, MpPose Pose, StatusState[] Statuses, float HpFraction);
+// 60 Hz 只送**會動的東西**：位置、朝向、生死、動畫。狀態列與 HP 跟著 20 Hz 的完整
+// RolesSnapshot 走——先前兩者綁在一起，量到的封包是 3455 B（每人 3 個狀態）對 1375 B，
+// 六成的位元組是每秒 60 次重送同一份狀態列（維護者 2026-09-18 要求先做不影響穩定度的優化）。
+public sealed record RolePoseState(PartyRole Role, bool Dead, MpPose Pose, ushort Timeline = 0);
+
+// Timeline＝該成員當下的 base ActionTimeline（slot 0），讓替身播出來源端真正在播的動畫。
+public sealed record RoleState(PartyRole Role, bool Dead, MpPose Pose, StatusState[] Statuses, float HpFraction,
+    ushort Timeline = 0);
 public sealed record EventObjectState(int NetId, uint EobjId, uint LayoutId, ushort TimelineState, ushort CurrentState, MpPose Pose);
 public sealed record TetherState(int NetId, ushort TetherId, MpEntity Source, MpEntity Target);
 public sealed record StaticVisualState(int NetId, string ResourceKey, MpVector Position, MpQuaternion Rotation, MpVector Scale);
@@ -35,6 +42,10 @@ public sealed record WorldSnapshotMessage(
     EnemyState[] Enemies, EventObjectState[] EventObjects, TetherState[] Tethers,
     StaticVisualState[] StaticVisuals, PartyMarkerState[] PartyMarkers,
     PartyMarkerAck[]? PartyMarkerAcks = null) : MpMessage, IHostMessage, IRunMessage, ILatestState;
+// 只帶變動的角色（常態 1～3 人在動，先前每次都送滿 8 格）。掉一則沒有後果：
+// 20 Hz 的完整 RolesSnapshot 會在 50 ms 內把所有人校正回來。
+public sealed record PoseSnapshotMessage(RolePoseState[] Poses) : MpMessage, IHostMessage, IRunMessage, ILatestState;
+
 public sealed record RolesSnapshotMessage(RoleState[] Roles) : MpMessage, IHostMessage, IRunMessage, ILatestState;
 public sealed record WorldEventMessage(WorldEvent Event) : MpMessage, IHostMessage, IRunMessage;
 

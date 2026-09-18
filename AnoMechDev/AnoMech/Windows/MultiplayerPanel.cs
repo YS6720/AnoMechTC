@@ -14,7 +14,9 @@ internal sealed class MultiplayerPanel(Plugin plugin)
     private static readonly Vector4 Warn = new(1f, 0.8f, 0.2f, 1f);
     private static readonly Vector4 Muted = new(0.7f, 0.7f, 0.7f, 1f);
     private const string OutboundScope =
-        "外送範圍：顯示名稱（預設為角色名，可改）、房間／場次識別、版本與場景摘要、分工、模擬位置及 HP／狀態／世界特效；不傳錄影檔、聊天、裝備、伺服器或帳號資料。";
+        "外送範圍：顯示名稱（預設為角色名，可改）、房間／場次識別、版本與場景摘要、分工、模擬位置及 HP／狀態／世界特效；"
+        + "開啟「同步真人外觀」時另含你的原版外觀（customize、五件裝備與雙手武器的 model id）；"
+        + "不傳錄影檔、聊天、伺服器或帳號資料。";
     // 預設帶入角色名：維護者 2026-09-17——大廳裡全是「匿名」「+」「3G」分不出誰是誰。
     // 仍可自行改成別名；空白時下一幀會再帶回角色名。
     private string alias = "";
@@ -205,6 +207,18 @@ internal sealed class MultiplayerPanel(Plugin plugin)
         ImGui.TextDisabled("(?)");
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("預設是你的角色名，方便隊友辨識；想用別名直接改。只在房間內顯示，不含伺服器。");
+        var shareAppearance = plugin.Configuration.MultiplayerShareAppearance;
+        if (ImGui.Checkbox("同步真人外觀", ref shareAppearance))
+        {
+            plugin.Configuration.MultiplayerShareAppearance = shareAppearance;
+            plugin.Configuration.Save();
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled("(?)");
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把自己的原版外觀送給同房隊友，替身就長得像本人。\n"
+                + "進房時取一次，之後換裝不會同步；Penumbra／Glamourer 的改造帶不過去。\n"
+                + "關掉就完全不送，隊友看到的是預設替身。");
         var aliasOk = MpValidation.Alias(alias);
         if (!aliasOk)
             WrappedColored(Warn, $"名稱無效：請填寫非空白、不含控制字元，且不超過 {MpValidation.AliasUtf8Bytes} 個 UTF-8 位元組的名稱。超過長度會直接拒絕，不會自動截斷。");

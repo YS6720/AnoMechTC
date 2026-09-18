@@ -80,7 +80,8 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
         // Normal Tick already consumed the action latch. Sample it here only
         // while paused, when the network pump still runs but Game.Tick does not.
         if (sampleActivity) SampleActivity();
-        return new SelfPoseMessage(new MpPose(MpVector.From(Position), Rotation), IsMoving, IsActing);
+        return new SelfPoseMessage(new MpPose(MpVector.From(Position), Rotation), IsMoving, IsActing,
+            CurrentActionTimeline);
     }
 
     internal void ApplyNetworkState(bool dead, float hpFraction)

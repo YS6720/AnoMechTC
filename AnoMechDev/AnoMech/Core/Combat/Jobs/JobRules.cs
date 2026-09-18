@@ -27,6 +27,8 @@ internal interface IJobGaugeRules
 {
     void OnLocalFire(uint actionId, bool comboOk);
     void Reset();
+    /// <summary>Per-frame, only inside a running practice: gauges that fill over time.</summary>
+    void Tick(float deltaSeconds) { }
 }
 
 internal static class JobRules
@@ -40,6 +42,7 @@ internal static class JobRules
 
     private static readonly Dictionary<byte, IJobGaugeRules> GaugeRules = new()
     {
+        [Paladin.JobId] = Paladin.Instance,
     };
 
     internal static IJobStatusRules? StatusesFor(byte classJob)
@@ -60,5 +63,10 @@ internal static class JobRules
     internal static void ResetLocalGauge()
     {
         foreach (var rules in GaugeRules.Values) rules.Reset();
+    }
+
+    internal static void TickLocalGauge(byte classJob, float deltaSeconds)
+    {
+        if (GaugeRules.TryGetValue(classJob, out var rules)) rules.Tick(deltaSeconds);
     }
 }

@@ -92,6 +92,28 @@ public static class MpValidation
         value.WaymarkIndex is >= 0 and <= 1024 && Finite(value.EventTimeScale) &&
         value.EventTimeScale is > 0 and <= 100;
 
+    // 外觀是**遠端位元組寫進 native 繪製結構**：不合法的 race／tribe／sex／bodyType 組合
+    // 會讓模型載入把客戶端打掛。這裡做不依賴遊戲資料的結構檢查（長度、列舉範圍、尺寸有限）；
+    // race／tribe 是否真的存在於 Lumina 表，在套用前由 PlayerAppearance.IsValid 再驗一次
+    // （那條需要 DataManager，純邏輯測試載不到）。驗不過就當沒有，不做部分套用。
+    public const int CustomizeBytes = 21;
+    private const byte MaxSex = 1;
+    private const byte MaxBodyType = 4;
+
+    public static bool Appearance(MpAppearance? appearance)
+    {
+        if (appearance == null) return true;
+        if (appearance.Customize is not { Length: CustomizeBytes } customize) return false;
+        if (appearance.Equipment is not { Length: MpAppearance.EquipmentSlots }) return false;
+        if (customize[0] == 0 || customize[4] == 0) return false;       // race / tribe
+        if (customize[1] > MaxSex) return false;                        // sex
+        if (customize[2] is 0 or > MaxBodyType) return false;           // bodyType
+        return Scale(appearance.Height) && Scale(appearance.VfxScale);
+    }
+
+    // 狀態特效尺寸：0 會讓特效消失、過大會蓋滿畫面。真值約在 0.3～1.2。
+    private static bool Scale(float value) => Finite(value) && value is > 0.05f and <= 4f;
+
     public static bool Lobby(LobbyMember[]? members)
     {
         if (members == null || members.Length is < 1 or > MpLimits.Members) return false;
@@ -100,7 +122,8 @@ public static class MpValidation
         foreach (var member in members)
         {
             if (member == null || member.PeerId == Guid.Empty || !peers.Add(member.PeerId) ||
-                !Alias(member.Alias) || !Fingerprint(member.BuildFingerprint)) return false;
+                !Alias(member.Alias) || !Fingerprint(member.BuildFingerprint) ||
+                !Appearance(member.Appearance)) return false;
             if (member.Role is not { } role) continue;
             if (!Role(role) || (roleMask & (1 << (int)role)) != 0) return false;
             roleMask |= 1 << (int)role;
@@ -110,7 +133,8 @@ public static class MpValidation
 
     public static bool Validate(MpMessage? message) => message switch
     {
-        HelloMessage hello => Alias(hello.Alias) && Fingerprint(hello.BuildFingerprint),
+        HelloMessage hello => Alias(hello.Alias) && Fingerprint(hello.BuildFingerprint)
+            && Appearance(hello.Appearance),
         LobbyMessage lobby => Lobby(lobby.Members),
         ClaimRoleMessage claim => Role(claim.Role),
         RejectedMessage rejected => rejected.RecipientId != Guid.Empty && Error(rejected.Error) && rejected.Error != MpError.None,

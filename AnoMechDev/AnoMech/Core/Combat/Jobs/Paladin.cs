@@ -3,6 +3,8 @@ using System.Collections.Generic;
 
 using AnoMech.Core.Game.Party;
 using AnoMech.Core.SimObjects;
+using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.Game.Gauge;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 
 namespace AnoMech.Core.Combat.Jobs;
@@ -18,7 +20,7 @@ namespace AnoMech.Core.Combat.Jobs;
 // 遊戲本體是有 30 秒倒數的，寫負值等於把它藏掉。改成不覆寫——SimStatus.Tick 每幀把
 // 遞減中的 RemainingTime 寫進原生槽，倒數就跟著跑。狀態的存活仍由 SimStatus 決定，
 // 不是交給引擎：它在 RemainingTime 歸零時 Despawn，與寫入值一致。
-internal sealed class Paladin : IJobStatusRules
+internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
 {
     internal const byte JobId = 19;
     internal static readonly Paladin Instance = new();
@@ -150,4 +152,85 @@ internal sealed class Paladin : IJobStatusRules
 
     private static void Remove(SimCharacter player, ushort statusId, PartyRole sourceRole)
         => player.RemoveStatus(statusId, sourceRole);
+
+    // ---- IJobGaugeRules：忠義量譜（本機、只寫自己）----
+    //
+    // 模擬區的防火牆擋掉伺服器封包，所以量譜在練習時完全不會動——維護者 2026-09-18 要求補上。
+    // 回復只有一條路：**每次自動攻擊揮擊 +5**（維護者更正：沒有隨時間自動回復）。揮擊節奏
+    // 取自實際裝備主手的 Lumina `Delayms`，不是猜一個固定值，且只有自動攻擊確實開著時才累加。
+    // 練習開場直接給滿 100：練的是機制，不是從零疊忠義（維護者 2026-09-18）。
+    private const uint Sheltron = 3542;
+    private const uint HolySheltron = 25746;
+    private const uint Intervention = 7382;
+    private const uint Cover = 27;
+    private const int OathMax = 100;
+    private const int OathPerAutoAttack = 5;
+    private const int SpendCost = 50;
+    private const float FallbackWeaponDelaySeconds = 2.24f;
+
+    private float autoAttackTimer;
+
+    private static PaladinGauge* Gauge()
+    {
+        var manager = JobGaugeManager.Instance();
+        if (manager == null || manager->ClassJobId != JobId || manager->CurrentGauge == null) return null;
+        return (PaladinGauge*)manager->CurrentGauge;
+    }
+
+    /// <summary>主手武器的攻擊間隔；讀不到就用騎士常見的 2.24 秒。</summary>
+    private static float WeaponDelaySeconds()
+    {
+        var inventory = InventoryManager.Instance();
+        var equipped = inventory == null ? null : inventory->GetInventoryContainer(InventoryType.EquippedItems);
+        if (equipped == null || equipped->Size == 0) return FallbackWeaponDelaySeconds;
+        var slot = equipped->GetInventorySlot(0);
+        if (slot == null || slot->ItemId == 0) return FallbackWeaponDelaySeconds;
+        var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
+        if (!sheet.TryGetRow(slot->ItemId, out var item) || item.Delayms == 0) return FallbackWeaponDelaySeconds;
+        return item.Delayms / 1000f;
+    }
+
+    private static void AddOath(PaladinGauge* gauge, int amount)
+        => gauge->OathGauge = (byte)Math.Clamp(gauge->OathGauge + amount, 0, OathMax);
+
+    public void Tick(float deltaSeconds)
+    {
+        var gauge = Gauge();
+        if (gauge == null) return;
+        // 自動攻擊沒開就不累加，也不讓計時器偷跑：下次開打從一個完整間隔開始。
+        if (Plugin.PlayerInputHooks?.IsAutoAttacking != true)
+        {
+            autoAttackTimer = 0f;
+            return;
+        }
+        var delay = WeaponDelaySeconds();
+        autoAttackTimer += deltaSeconds;
+        while (autoAttackTimer >= delay)
+        {
+            autoAttackTimer -= delay;
+            AddOath(gauge, OathPerAutoAttack);
+        }
+    }
+
+    public void OnLocalFire(uint actionId, bool comboOk)
+    {
+        var gauge = Gauge();
+        if (gauge == null) return;
+        switch (actionId)
+        {
+            case Sheltron or HolySheltron or Intervention or Cover:
+                AddOath(gauge, -SpendCost);
+                break;
+            default:
+                return;
+        }
+        Core.CrashTrace.Log($"[量譜] PLD a={actionId} 忠義={gauge->OathGauge}");
+    }
+
+    public void Reset()
+    {
+        autoAttackTimer = 0f;
+        var gauge = Gauge();
+        if (gauge != null) gauge->OathGauge = OathMax;
+    }
 }

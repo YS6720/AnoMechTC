@@ -22,6 +22,7 @@ public class TopP5OmegaAi : IScenarioAi<TopP5OmegaState>
     public void Run(TopP5OmegaState s, SimWorld world)
     {
         state = s;
+        PrepareState();
         helloWorld1 = solveHelloWorld1(world.Party);
         var ai = new AiManager(world, deferToArrival: true);
         ai.Move(0f, InitialPositions);
@@ -166,6 +167,9 @@ public class TopP5OmegaAi : IScenarioAi<TopP5OmegaState>
     {
         move.MultiplyX(state.MonitorSide.Mul);
     }
+
+    /// <summary>打法專屬的盤面調整；預設不動（Standard 維持原本的抽法）。</summary>
+    protected virtual void PrepareState() { }
 
     protected virtual RoleList solveHelloWorld1(SimParty party)
     {

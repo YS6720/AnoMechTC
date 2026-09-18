@@ -15,6 +15,8 @@ public sealed class MultiplayerSession : IDisposable
     private readonly IRelayTransport transport;
     private readonly IMultiplayerGame game;
     private readonly string alias;
+    // 進房時取一次：外觀是常數級資料，取樣時機固定才不會有人看到半舊半新的隊友。
+    private readonly MpAppearance? localAppearance;
     private readonly Dictionary<Guid, LobbyMember> members = new();
     private readonly HashSet<Guid> connected = new();
     private readonly Dictionary<Guid, long> sequences = new();
@@ -36,6 +38,7 @@ public sealed class MultiplayerSession : IDisposable
     private SelfPoseMessage? lastSelfPose;
     private readonly MpPose[] lastRolePoses = new MpPose[MpLimits.Members];
     private readonly bool[] lastRoleDead = new bool[MpLimits.Members];
+    private readonly ushort[] lastRoleTimeline = new ushort[MpLimits.Members];
     private bool ownsNativeRun;
     private bool prepareSent;
     private bool localPrepared;
@@ -59,6 +62,8 @@ public sealed class MultiplayerSession : IDisposable
         this.transport = transport;
         this.game = game;
         this.alias = alias;
+        var captured = game.LocalAppearance;
+        localAppearance = MpValidation.Appearance(captured) ? captured : null;
     }
 
     public RelayIdentity? Identity { get; private set; }
@@ -195,6 +200,10 @@ public sealed class MultiplayerSession : IDisposable
                 // Creation state must still precede reliable cues and later retirement.
                 if (!Send(scope.RunId, game.CaptureWorld()))
                     return;
+                // 完整名冊（狀態列＋HP）只走 20 Hz。它同時是 60 Hz 輕量取樣的校正基準：
+                // 輕量取樣掉幾則最多讓某人慢 50 ms 歸位，不會讓任何狀態過期。
+                if (IsHost && !Send(scope.RunId, game.CaptureRoles()))
+                    return;
             }
             if (poseDue)
             {
@@ -206,13 +215,10 @@ public sealed class MultiplayerSession : IDisposable
                 var keepalive = now >= nextPoseKeepalive;
                 if (IsHost)
                 {
-                    var roles = game.CaptureRoles();
-                    if (keepalive || RolePosesChanged(roles))
-                    {
-                        nextPoseKeepalive = now + 1d / MpLimits.SnapshotHz;
-                        if (!Send(scope.RunId, roles))
-                            return;
-                    }
+                    // 只送**變動的**角色：常態是 1～3 人在動，先前每則都送滿 8 格。
+                    if (ChangedRolePoses(game.CapturePoses()) is { Length: > 0 } changed &&
+                        !Send(scope.RunId, new PoseSnapshotMessage(changed)))
+                        return;
                 }
                 else if (game.CaptureSelfPose() is { } pose && (keepalive || pose != lastSelfPose))
                 {
@@ -239,22 +245,24 @@ public sealed class MultiplayerSession : IDisposable
         catch (Exception ex) { Fail(ex); }
     }
 
-    // Pose / death are what needs PoseHz; statuses and HP ride the keepalive cadence.
-    private bool RolePosesChanged(RolesSnapshotMessage roles)
+    // Pose / death / animation are what needs PoseHz; statuses and HP ride the 20 Hz snapshot.
+    // 回傳「這一輪真的變了的角色」，沒變的人一個位元組都不送。
+    private RolePoseState[] ChangedRolePoses(RolePoseState[] poses)
     {
-        var changed = false;
-        foreach (var role in roles.Roles)
+        List<RolePoseState>? changed = null;
+        foreach (var pose in poses)
         {
-            var i = (int)role.Role;
+            var i = (int)pose.Role;
             if ((uint)i >= (uint)lastRolePoses.Length) continue;
-            if (role.Pose != lastRolePoses[i] || role.Dead != lastRoleDead[i])
-            {
-                changed = true;
-                lastRolePoses[i] = role.Pose;
-                lastRoleDead[i] = role.Dead;
-            }
+            if (pose.Pose == lastRolePoses[i] && pose.Dead == lastRoleDead[i] &&
+                pose.Timeline == lastRoleTimeline[i])
+                continue;
+            lastRolePoses[i] = pose.Pose;
+            lastRoleDead[i] = pose.Dead;
+            lastRoleTimeline[i] = pose.Timeline;
+            (changed ??= []).Add(pose);
         }
-        return changed;
+        return changed?.ToArray() ?? [];
     }
 
     public MpError ClaimRole(PartyRole role)
@@ -339,11 +347,12 @@ public sealed class MultiplayerSession : IDisposable
         Phase = MultiplayerPhase.Lobby;
         if (identity.IsHost)
         {
-            members.Add(identity.PeerId, new LobbyMember(identity.PeerId, alias, null, game.BuildFingerprint));
+            members.Add(identity.PeerId,
+                new LobbyMember(identity.PeerId, alias, null, game.BuildFingerprint, localAppearance));
             PublishLobby();
         }
         else
-            Send(Guid.Empty, new HelloMessage(alias, game.BuildFingerprint));
+            Send(Guid.Empty, new HelloMessage(alias, game.BuildFingerprint, localAppearance));
     }
 
     private void Receive(RelayEvent item, double now)
@@ -420,7 +429,8 @@ public sealed class MultiplayerSession : IDisposable
                     Reject(packet.SenderId, MpError.BuildMismatch);
                     return;
                 }
-                members.Add(packet.SenderId, new LobbyMember(packet.SenderId, hello.Alias, null, hello.BuildFingerprint));
+                members.Add(packet.SenderId,
+                    new LobbyMember(packet.SenderId, hello.Alias, null, hello.BuildFingerprint, hello.Appearance));
                 PublishLobby();
                 return;
             case LobbyMessage lobby when !IsHost:
@@ -518,6 +528,9 @@ public sealed class MultiplayerSession : IDisposable
                     foreach (var ack in acks)
                         if (ack.PeerId == identity.PeerId) { acked = ack.RequestId; break; }
                 game.ApplyWorld(world, acked);
+                break;
+            case PoseSnapshotMessage poses when !IsHost && Phase == MultiplayerPhase.Running:
+                game.ApplyPoses(poses);
                 break;
             case RolesSnapshotMessage roles when !IsHost && Phase == MultiplayerPhase.Running:
                 game.ApplyRoles(roles);
@@ -618,6 +631,7 @@ public sealed class MultiplayerSession : IDisposable
         lastSelfPose = null;
         Array.Clear(lastRolePoses);
         Array.Clear(lastRoleDead);
+        Array.Clear(lastRoleTimeline);
         if (!host)
             CaptureLocalPartyMarkers();
     }
@@ -763,7 +777,8 @@ public sealed class MultiplayerSession : IDisposable
                 Reject(peerId, MpError.BuildMismatch);
                 continue;
             }
-            members.Add(peerId, new LobbyMember(peerId, hello.Alias, null, hello.BuildFingerprint));
+            members.Add(peerId,
+                new LobbyMember(peerId, hello.Alias, null, hello.BuildFingerprint, hello.Appearance));
         }
         deferredHellos.Clear();
         PublishLobby();

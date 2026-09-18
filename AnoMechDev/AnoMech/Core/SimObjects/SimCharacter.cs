@@ -80,6 +80,7 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
     public virtual void Tick(float deltaSeconds)
     {
         RefreshPosition();
+        snapshots.Record(deltaSeconds, Position);
         statusList.Update(deltaSeconds);
         vfx.Update(deltaSeconds);
         Movement.Tick(deltaSeconds);
@@ -100,6 +101,13 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
     public virtual Vector3 Position => position;
     public virtual float Rotation { get; private set; }
 
+    // Damage snapshot history: the game reads your position a short moment before the omen
+    // ends (維護者 2026-09-18：「橘預警線結束 0.3 秒前站進去都還不會算傷害」), while we used to
+    // judge at the exact resolution frame — anyone entering late died. Logic lives in
+    // PositionSnapshotBuffer so the rule is unit-testable without native access.
+    private AnoMech.Core.Game.PositionSnapshotBuffer snapshots;
+    public Vector3 SnapshotPosition => snapshots.Resolve(Position);
+
     // Position only: do not advance movement, statuses, casts, or input state.
     internal void RefreshPosition()
     {
@@ -108,7 +116,7 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
         position = Coordinates.ToLocal(native->Position);
         Rotation = native->Rotation;
     }
-    
+
     public virtual void SetPosition(Vector3 position)
     {
         var obj = BattleCharaPtr;
@@ -415,6 +423,21 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
         return true;
     }
     
+    /// <summary>
+    /// 目前 base（slot 0）正在播的 ActionTimeline id。連線時用來把**擁有者實際的動畫**
+    /// 搬到別人畫面上的替身——走路／跑步／跳躍／情感動作都是不同的 id，用位移猜只能猜出
+    /// 「跑或站」兩種。讀不到原生物件時回 0。
+    /// </summary>
+    public ushort CurrentActionTimeline
+    {
+        get
+        {
+            var chara = BattleCharaPtr;
+            if (chara == null) return 0;
+            return chara->Timeline.TimelineSequencer.GetSlotTimeline(0);
+        }
+    }
+
     public void ResetActionTimeline()
     {
         var bc = BattleCharaPtr;

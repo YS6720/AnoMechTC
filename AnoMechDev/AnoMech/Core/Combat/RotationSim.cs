@@ -403,6 +403,7 @@ public sealed unsafe class RotationSim : IDisposable
             }
             if (game.Paused) return;
 
+            Jobs.JobRules.TickLocalGauge((byte)Plugin.PlayerState.ClassJob.RowId, delta);
             comboAge = MathF.Min(30f, comboAge + delta);
             if (comboAge >= 30f) shadowCombo = CurrentCombo = 0;
             localEvents.Tick(delta);

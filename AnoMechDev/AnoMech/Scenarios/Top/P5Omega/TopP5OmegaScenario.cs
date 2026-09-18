@@ -27,7 +27,10 @@ public sealed class TopP5OmegaScenario : IScenario
     public bool HasSettings => true;
     private readonly TopP5OmegaSettingsWindow settingsWindow = new();
 
-    public IReadOnlyList<IScenarioAi> AiStrats => [new TopP5OmegaAi(), new TopP5OmegaMoogleAi()];
+    // 新打法一律往**後面**加：AiIndex 會被連戰清單與 run descriptor 記住，
+    // 插在中間會讓既有設定指到別的打法。
+    public IReadOnlyList<IScenarioAi> AiStrats =>
+        [new TopP5OmegaAi(), new TopP5OmegaMoogleAi(), new TopP5OmegaSecondTargetAi()];
 
     public void Run(SimWorld worldParam, int? selectedAi)
     {
