@@ -120,18 +120,17 @@ public static class WorldValidation
         return true;
     }
 
+    // 動畫 id 不在這裡設上限：真表最大 row id 是 25000，任何寫死的數字都會誤殺真技能
+    //（2026-09-19 事故）。守門的是套用前的 ActionTimeline 查表。
     public static bool ValidateRolePose(RolePoseState pose)
-        => pose is not null && Enum.IsDefined(pose.Role) && ValidatePose(pose.Pose) &&
-            pose.Timeline <= MpLimits.TimelineIdMax;
+        => pose is not null && Enum.IsDefined(pose.Role) && ValidatePose(pose.Pose);
 
     public static bool ValidateRole(RoleState role)
     {
         return role is not null && Enum.IsDefined(role.Role) &&
             ValidatePose(role.Pose) &&
             ValidateStatuses(role.Statuses) &&
-            FiniteRange(role.HpFraction, 0f, 1f) &&
-            // 動畫 id 是遠端值，套用前還會再查 ActionTimeline 表；這裡只擋明顯超界。
-            role.Timeline <= MpLimits.TimelineIdMax;
+            FiniteRange(role.HpFraction, 0f, 1f);
     }
     public static bool ValidatePartyMarker(PartyMarkerState marker)
         => marker is not null && Enum.IsDefined(marker.Role) && Enum.IsDefined(marker.Sign);
