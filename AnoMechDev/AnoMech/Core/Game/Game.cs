@@ -255,6 +255,7 @@ public sealed partial class Game : IDisposable
             new TopP5DeltaScenario(),
             new TopP5SigmaScenario(),
             new TopP5OmegaScenario(),
+            new Scenarios.Top.P6AlphaOmega.TopP6AlphaOmegaScenario(),
             new TopP6WaveCannon2Scenario(),
         };
         if (BuildEdition.IsDeveloper)

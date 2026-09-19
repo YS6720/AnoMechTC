@@ -28,6 +28,7 @@ public sealed unsafe class RotationSim : IDisposable
 
     private readonly Hook<UseActionDelegate>? hook;
     private readonly EventScheduler localEvents = new();
+    private readonly PracticeLimitBreakGauge limitBreakGauge = new();
     private int diagLeft = 12;
     private long schedulerGeneration;
     private long lastUpdateMilliseconds;
@@ -77,8 +78,27 @@ public sealed unsafe class RotationSim : IDisposable
                         uint extraParam, ActionManager.UseActionMode mode, uint comboRouteId, bool* outOpt)
     {
         byte ret;
+        var statusActionId = actionId;
+        var generalTankLimitBreak = false;
         try
         {
+            var practice = Plugin.GameInstance;
+            if (practice is { HasActivePractice: true, Paused: false } &&
+                practice.World.Map.IsInInstance &&
+                TankLimitBreak.IsTank((byte)Plugin.PlayerState.ClassJob.RowId) &&
+                actionType == ActionType.GeneralAction && actionId == TankLimitBreak.GeneralActionId)
+            {
+                limitBreakGauge.Update(true, practice.ScenarioDispatchGeneration);
+                var gauge = FFXIVClientStructs.FFXIV.Client.Game.UI.LimitBreakController.StaticAddressPointers.pInstance;
+                var player = Player();
+                if (gauge != null && player != null && gauge->BarUnits > 0 && gauge->CurrentUnits >= gauge->BarUnits)
+                {
+                    var grade = (byte)Math.Clamp(gauge->CurrentUnits / gauge->BarUnits - 1, 0, 2);
+                    statusActionId = gauge->GetActionId(player, grade);
+                    generalTankLimitBreak = TankLimitBreak.TryGetStatus(statusActionId,
+                        (byte)Plugin.PlayerState.ClassJob.RowId, out _, out _);
+                }
+            }
             // Original is intentionally called exactly once. A failed native call
             // is rejected rather than retried, which could submit a duplicate cast.
             ret = hook!.Original(am, actionType, actionId, targetId, extraParam, mode, comboRouteId, outOpt);
@@ -113,6 +133,10 @@ public sealed unsafe class RotationSim : IDisposable
             }
             if (ret != 0 && actionType == ActionType.Action && canProcess && !areaTargeted)
                 OnActionUsed(am, actionId, targetId);
+            else if (ret != 0 && generalTankLimitBreak && canProcess && !areaTargeted)
+                OnActionUsed(am, statusActionId, 0);
+            if (generalTankLimitBreak)
+                CrashTrace.Log($"[LB] 原生施放 a={statusActionId} ret={ret} active={canProcess}");
         }
         catch (Exception ex)
         {
@@ -379,6 +403,8 @@ public sealed unsafe class RotationSim : IDisposable
             var delta = MathF.Max(0f, (now - lastUpdateMilliseconds) / 1000f);
             lastUpdateMilliseconds = now;
             var inSim = game.World.Map.IsInInstance;
+            limitBreakGauge.Update(inSim && game.HasActivePractice &&
+                TankLimitBreak.IsTank((byte)Plugin.PlayerState.ClassJob.RowId), game.ScenarioDispatchGeneration);
             if (inSim != wasInSim)
             {
                 var amx = ActionManager.Instance();
@@ -438,6 +464,7 @@ public sealed unsafe class RotationSim : IDisposable
     {
         Plugin.Framework.Update -= ReassertCombo;
         localEvents.Clear();
+        limitBreakGauge.Restore();
         hook?.Disable();
         hook?.Dispose();
     }

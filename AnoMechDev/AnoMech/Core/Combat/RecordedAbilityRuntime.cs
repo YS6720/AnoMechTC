@@ -19,6 +19,8 @@ internal sealed class RecordedAbilityRuntime
     private const ushort SprintStatusId = 50;
     private const int SprintParam = 30;
     private const float SprintDuration = 10f;
+    private const uint ReprisalActionId = 7535;
+    private const ushort ReprisalStatusId = 1193;
 
     private readonly Game.Game game;
     private readonly RecordedAbilityCatalog catalog;
@@ -66,7 +68,9 @@ internal sealed class RecordedAbilityRuntime
 
         var observed = catalog.IsObservedAction(classJob, actionId, level);
         var jobRules = JobRules.StatusesFor(classJob);
-        var explicitDefault = actionId == SprintActionId ||
+        var reprisal = actionId == ReprisalActionId && TankLimitBreak.IsTank(classJob) && level >= 22;
+        var tankLimitBreak = TankLimitBreak.TryGetStatus(actionId, classJob, out var lbStatus, out var lbDuration);
+        var explicitDefault = actionId == SprintActionId || reprisal || tankLimitBreak ||
             (jobRules?.IsKnownAction(actionId) == true);
         if (!observed && !explicitDefault) return false;
 
@@ -101,9 +105,35 @@ internal sealed class RecordedAbilityRuntime
             QueueApply(state, state.Caster, SprintStatusId, SprintParam, SprintDuration, 0f);
         }
 
+        if (reprisal)
+        {
+            // Self-centred AoE; include the enemy's hitbox (P6's boss is much
+            // larger than the sheet radius). Never write helper/non-targetable actors.
+            var radius = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>()
+                .GetRow(ReprisalActionId).EffectRange;
+            foreach (var child in game.World.Children)
+            {
+                if (child is not SimEnemy { IsActive: true, Targetable: true } enemy) continue;
+                var reach = radius + enemy.HitboxRadius;
+                if (state.Caster.Placement().DistanceSq(enemy) > reach * reach) continue;
+                // Lv90 recording: status 1193, param 0, ~10s; Enhanced Reprisal
+                // at Lv98 extends to 15s. This state is visual, not damage reduction.
+                QueueApply(state, enemy, ReprisalStatusId, 0, level >= 98 ? 15f : 10f, 0f);
+            }
+        }
+        if (tankLimitBreak)
+        {
+            var radius = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>()
+                .GetRow(actionId).EffectRange;
+            foreach (var member in game.World.Party.ActiveMembers())
+                if (state.Caster.Placement().DistanceSq(member) <= radius * radius)
+                    QueueApply(state, member, lbStatus, 0, lbDuration, 0f);
+        }
+
         foreach (var rule in rules)
         {
             if (rule.ActionId == SprintActionId && rule.StatusId == SprintStatusId) continue;
+            if (reprisal && rule.StatusId == ReprisalStatusId || tankLimitBreak && rule.StatusId == lbStatus) continue;
             if (jobRules != null && JobRules.IsOwnedTransition(jobRules, actionId, rule.StatusId)) continue;
             var recipient = rule.TargetKind == RecordedAbilityTargetKind.Self ? state.Caster : target!;
             QueueApply(state, recipient, rule.StatusId, rule.Param!.Value, rule.DurationSeconds, rule.DelaySeconds);

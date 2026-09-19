@@ -97,6 +97,10 @@ public static class MpValidation
     // race／tribe 是否真的存在於 Lumina 表，在套用前由 PlayerAppearance.IsValid 再驗一次
     // （那條需要 DataManager，純邏輯測試載不到）。驗不過就當沒有，不做部分套用。
     public const int CustomizeBytes = 21;
+    // 這兩個**不是猜的上限，是列舉**：sex 只有 0／1；bodyType 決定模型路徑（成人／幼年），
+    // 遊戲用的就是 1–4。它們與 race／tribe 一樣屬於「錯了會在模型載入時當機」的欄位，
+    // 所以保持保守；而且驗不過的後果是**退回預設替身**（Capture 端就會擋下自己的值），
+    // 不是斷線——與動畫 id 那條走的是完全不同的失敗路徑。
     private const byte MaxSex = 1;
     private const byte MaxBodyType = 4;
 
@@ -111,8 +115,9 @@ public static class MpValidation
         return Scale(appearance.Height) && Scale(appearance.VfxScale);
     }
 
-    // 狀態特效尺寸：0 會讓特效消失、過大會蓋滿畫面。真值約在 0.3～1.2。
-    private static bool Scale(float value) => Finite(value) && value is > 0.05f and <= 4f;
+    // 狀態特效尺寸：只要求有限且為正。**不設上限**——這個值是來源端從自己的角色讀出來的
+    // 真值，任何「我覺得不會超過」的數字都是憑空發明的規格（2026-09-19 動畫 id 事故同一類）。
+    private static bool Scale(float value) => Finite(value) && value > 0f;
 
     public static bool Lobby(LobbyMember[]? members)
     {
