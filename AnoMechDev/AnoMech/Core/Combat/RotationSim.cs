@@ -482,7 +482,7 @@ public sealed unsafe class RotationSim : IDisposable
             var inSim = game.World.Map.IsInInstance;
             limitBreakGauge.Update(inSim && game.HasActivePractice &&
                 (game.World.LimitBreaks != null || TankLimitBreak.IsTank((byte)Plugin.PlayerState.ClassJob.RowId)),
-                game.ScenarioDispatchGeneration, game.World.LimitBreaks?.IsAvailable);
+                game.ScenarioDispatchGeneration, game.World.LimitBreaks?.HasGaugeCharge);
             ObserveSoloLimitBreak(game, now);
             if (inSim != wasInSim)
             {

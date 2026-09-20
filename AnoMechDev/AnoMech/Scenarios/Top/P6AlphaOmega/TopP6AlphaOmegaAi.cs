@@ -67,31 +67,36 @@ public sealed class TopP6AlphaOmegaAi : IScenarioAi<bool>
             Move(ai, world, FirstPuddleAt + (step - 1) * PuddleInterval + 0.05f,
                 () => AiMove.All(destination));
         }
-        // Sixth snapshot: immediately head inward toward each clock direction.
-        // The short turns leave bait five nearby, so use a deep inner approach
-        // rather than cutting through that still-pending circle on the way back.
-        Move(ai, world, LastPuddleAt + 0.05f, () => ClockSpots(2f));
+        var finalHeading = heading + direction * 4f * turnAngle;
+        var south = new Vector2(MathF.Sin(finalHeading), -MathF.Cos(finalHeading));
+        // Dodge the sixth bait outward before returning. Cutting straight inward
+        // here clips the fifth puddle when the manual player's bait is off-stack.
+        Move(ai, world, LastPuddleAt + 0.05f, () => AiMove.All(south * turnRadius));
         if (!second)
         {
+            // Finish the short turn and let the fifth puddle resolve first.
+            Move(ai, world, LastPuddleAt + PuddleDelay - PuddleInterval + 0.3f,
+                () => ClockSpots(2f));
             Move(ai, world, LastPuddleAt + PuddleDelay + 0.05f, () => ClockSpots(13.63f));
             // Two proteans are finished. B is east; both tanks stand boss-side.
             Move(ai, world, SecondProteanAt + 0.05f, StackAtB);
             return;
         }
 
-        // There is no second cannon after this Unlimited. Move the two tanks
-        // clear of the pending sixth puddle, then bait the two Cosmo Dive
-        // circles while the other six stay north.
-        Move(ai, world, 22.55f, () => AiMove.Create(new(-3f, -3f), new(3f, 3f),
-            new(0f, 13f), new(0f, 13f), new(0f, 13f), new(0f, 13f),
-            new(0f, 13f), new(0f, 13f)).NaturalOrder());
-        Move(ai, world, 23.765f, () => AiMove.Create(new(-6f, -6f), new(6f, 6f),
-            new(0f, 13f), new(0f, 13f), new(0f, 13f), new(0f, 13f),
-            new(0f, 13f), new(0f, 13f)).NaturalOrder());
-        // Restore first-enmity / farthest tank separation for the two later autos.
-        var gather = MeteorGatherPosition();
-        Move(ai, world, 26.18f, () => AiMove.Create(new(0f, -8f), new(0f, 16f),
-            gather, gather, gather, gather, gather, gather).NaturalOrder());
+        // Only tanks cross the center. The group is the Y's local south, not
+        // geographic south or waymark 3. Half a 2y waymark = 1y inward.
+        Move(ai, world, 22.55f, () => AiMove.Create(Vector2.Zero, Vector2.Zero).NaturalOrder());
+        Move(ai, world, LastPuddleAt + PuddleDelay + 0.05f, () =>
+        {
+            var stack = south * (turnRadius - 1f);
+            return AiMove.Create(null, null, stack, stack, stack, stack, stack, stack).NaturalOrder();
+        });
+        var left = new Vector2(-south.Y, south.X);
+        Move(ai, world, 23.765f, () => AiMove.Create(
+            -south * 6f + left * 6f, -south * 6f - left * 6f).NaturalOrder());
+        // After Dive, retain the six-player stack; restore tank enmity/farthest
+        // separation for the following autos without routing the group to 3.
+        Move(ai, world, 26.18f, () => AiMove.Create(-south * 8f, south * 16f).NaturalOrder());
         RunMeteorTail(world, SecondUnlimitedMeteorAt);
     }
 
@@ -175,6 +180,7 @@ public sealed class TopP6AlphaOmegaAi : IScenarioAi<bool>
     {
         var runtime = world.LimitBreaks;
         if (runtime == null || role == world.Party.PlayerRole ||
+            world.Party.Get(role) is SimNetworkPuppet { Orphaned: false } ||
             !runtime.IsAvailable || runtime.IsBusy(role))
             return;
         var actionId = runtime.ActionFor(role);

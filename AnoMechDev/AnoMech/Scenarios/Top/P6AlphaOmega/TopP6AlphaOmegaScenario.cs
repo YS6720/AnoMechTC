@@ -41,6 +41,7 @@ public sealed partial class TopP6AlphaOmegaScenario : IProgressScenario
     private readonly float[] lastLimitBreakAt = new float[8];
     private PartyRole? pendingMagicNumberHealer;
     private readonly Rng rng = new();
+    private int waveDiagnosticsRemaining;
 
     // Actual effects, not cast-end estimates: packets include ~0.3s cast slide.
     private static readonly (float Swing, float Hit)[] AutoAttacks =
@@ -142,6 +143,7 @@ public sealed partial class TopP6AlphaOmegaScenario : IProgressScenario
         damage = new DamageSolver(party);
         damage.SetStatuses(DamageType.Magic, StatusId.MagicVulnerabilityUp);
         failed = false;
+        waveDiagnosticsRemaining = 16;
         boss = null;
         meteorFlarePlan = null;
         Array.Fill(lastLimitBreakAt, float.NegativeInfinity);
@@ -365,7 +367,10 @@ public sealed partial class TopP6AlphaOmegaScenario : IProgressScenario
         var clockwise = rng.NextBool();
         // A/1/B/2/C/3/D/4: sample one of eight start rays and share it with the AI.
         var startAngle = rng.NextInt(8) * MathF.PI / 4f;
-        Core.ChatOutput.Coach($"[AnoMech] {(second ? "第二次" : "首次")}波動砲：限制解除：{(clockwise ? "順時針" : "逆時針")}；前兩圈直走、第三圈轉斜向，第六圈放下即回八方。");
+        var finish = second
+            ? "第六圈避開後人群內縮半個標點，雙坦穿中到對側左右引導。"
+            : "第六圈再轉一步，等第五圈炸完再經中央回八方。";
+        Core.ChatOutput.Coach($"[AnoMech] {(second ? "第二次" : "首次")}波動砲：限制解除：{(clockwise ? "順時針" : "逆時針")}；前兩圈直走、第三圈轉斜向，{finish}");
         for (var lane = 0; lane < ExaflareOffsets.Length; lane++)
         {
             // Inward facing is the negative of the clockwise-from-north start ray.
@@ -584,6 +589,7 @@ public sealed partial class TopP6AlphaOmegaScenario : IProgressScenario
         if (!circle && !rectangle) return;
 
         var rangeSquared = range * range;
+        var removed = 0;
         for (var i = 0; i < adds.Length; i++)
         {
             var add = adds[i];
@@ -597,8 +603,13 @@ public sealed partial class TopP6AlphaOmegaScenario : IProgressScenario
                     && dx * forwardX + dz * forwardZ <= range;
             if (!hit) continue;
             add.SetTargetable(false);
-            add.Despawn();
+            // Keep the hit actor visible for the opening LB impact animation.
+            // Hit geometry and Dynamis/refund timing stay at successful release.
+            world.Events.Add(1f, add.Despawn);
+            removed++;
         }
+        Core.CrashTrace.Log($"[LB隕石診斷] action={actionId} ground={ground} origin={origin}"
+            + $" rotation={rotation:F3} range={range} removed={removed}");
     }
 
     private void DropCosmoMeteorPuddles()
@@ -721,7 +732,19 @@ public sealed partial class TopP6AlphaOmegaScenario : IProgressScenario
             if (failed || helper == null) return;
             Release(helper, action, helper);
             if (lethal)
-                damage.Resolve(helper, action, [DamageType.Lethal], []);
+            {
+                var hits = damage.Resolve(helper, action, [DamageType.Lethal], []);
+                // Temporary per-hit evidence: rotating circles and tracked puddles
+                // share the same display name. Their action IDs disambiguate deaths.
+                foreach (var member in hits)
+                {
+                    if (waveDiagnosticsRemaining <= 0) break;
+                    waveDiagnosticsRemaining--;
+                    Core.CrashTrace.Log($"[P6波動砲診斷] t={world.Events.Time:F3} action={action}"
+                        + $" role={(member as ISimPartyMember)?.Role} source={helper.Position}"
+                        + $" live={member.Position} snapshot={member.SnapshotPosition}");
+                }
+            }
             else if (size is not null || stackMinTargets > 0)
                 damage.Resolve(helper, action, [DamageType.Magic], [],
                     stackMinTargets: stackMinTargets, size: size, killTargets: killTargets);

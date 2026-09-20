@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Numerics;
+using AnoMech.Core.Combat;
 using System.Security.Cryptography;
 using System.Text;
 using AnoMech.Core;
@@ -465,18 +467,34 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     {
         if (game.World.Party.Get(role) is SimNetworkPuppet puppet) puppet.Orphan();
     }
-    internal bool SubmitAbilityUse(uint actionId, byte classJob, byte level, SimCharacter? target)
+    internal bool SubmitAbilityUse(uint actionId, byte classJob, byte level, SimCharacter? target,
+        Vector3? location = null, long limitBreakRequestId = 0, bool cancelLimitBreak = false)
     {
         if (Session is not { Phase: MultiplayerPhase.Running } session ||
             replicator is null || !replicator.TryMapAbilityTarget(target, out var entity)) return false;
-        return session.SubmitAbilityUse(new AbilityUseMessage(actionId, classJob, level, entity));
+        return session.SubmitAbilityUse(new AbilityUseMessage(actionId, classJob, level, entity,
+            location is { } point ? MpVector.From(point) : null, limitBreakRequestId, cancelLimitBreak));
     }
     public bool ApplyAbilityUse(PartyRole role, AbilityUseMessage ability)
     {
         if (Session is not { IsHost: true, Phase: MultiplayerPhase.Running } ||
-            game.Paused || replicator is null || !MpValidation.Validate(ability)) return false;
+            replicator is null || !MpValidation.Validate(ability)) return false;
         SimCharacter? target = null;
-        if (ability.Target is { } entity && !replicator.TryResolveAbilityTarget(entity, out target)) return false;
+        var targetValid = ability.Target is not { } entity || replicator.TryResolveAbilityTarget(entity, out target);
+        if (game.World.LimitBreaks is { } limitBreaks)
+        {
+            var isLimitBreak = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>()
+                .GetRowOrDefault(ability.ActionId)?.ActionCategory.RowId == 9;
+            if (ability.LimitBreakRequestId > 0)
+            {
+                // Even a raced pause or retired target must acknowledge this attempt,
+                // otherwise the peer's pending input would stay reserved forever.
+                return limitBreaks.ApplyRequest(role, ability, target, !game.Paused && targetValid && isLimitBreak);
+            }
+            if (isLimitBreak) return false;
+        }
+        if (game.Paused || !targetValid || ability.Location != null ||
+            ability.LimitBreakRequestId != 0 || ability.CancelLimitBreak) return false;
         return game.Abilities.TryUse(role, ability.ActionId, ability.ClassJob, ability.Level, target);
     }
     public void ResetAbilityState() => game.Abilities.Reset();
@@ -484,12 +502,26 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     public void ApplyPartyMarker(Guid sender, PartyMarkerRequestMessage marker) => Replicator.ApplyPartyMarker(sender, marker);
     public WorldSnapshotMessage CaptureWorld() => Replicator.CaptureWorld();
     public RolePoseState[] CapturePoses() => Replicator.CapturePoses();
-    public RolesSnapshotMessage CaptureRoles() => Replicator.CaptureRoles();
+    public RolesSnapshotMessage CaptureRoles()
+        => Replicator.CaptureRoles() with { LimitBreak = game.World.LimitBreaks?.CaptureState() };
     public IReadOnlyList<WorldEvent> DrainEvents() => Replicator.DrainEvents();
     public WorldSnapshotMessage? TakeWorldAfterEvents() => Replicator.TakeWorldAfterEvents();
     public void ApplyWorld(WorldSnapshotMessage snapshot, long ackedMarkerRequest) => Replicator.ApplyWorld(snapshot, ackedMarkerRequest);
     public void ApplyPoses(PoseSnapshotMessage snapshot) => Replicator.ApplyPoses(snapshot);
-    public void ApplyRoles(RolesSnapshotMessage snapshot) => Replicator.ApplyRoles(snapshot);
+    public void ApplyRoles(RolesSnapshotMessage snapshot)
+    {
+        Replicator.ApplyRoles(snapshot);
+        if (snapshot.LimitBreak is { } state)
+        {
+            game.World.LimitBreaks ??= PracticeLimitBreakRuntime.CreateReplica(game.World);
+            game.World.LimitBreaks.ApplyNetworkState(state);
+        }
+        else if (game.World.LimitBreaks is { } previous)
+        {
+            previous.Dispose();
+            game.World.LimitBreaks = null;
+        }
+    }
     public void ApplyEvent(WorldEvent item) => Replicator.ApplyEvent(item);
     public RunStatusMessage CaptureRunStatus() => game.CaptureRunStatus();
     public void ApplyRunStatus(RunStatusMessage status)

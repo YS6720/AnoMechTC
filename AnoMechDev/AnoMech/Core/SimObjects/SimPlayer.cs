@@ -115,6 +115,7 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
 
     public override void Despawn()
     {
+        SimCast.CloseLocalCastBar(this);
         base.Despawn();
         StopMoving();
         // Undo any KO bar drop (no-op if already full). Unconditional so it also covers a godmode

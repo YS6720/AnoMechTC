@@ -46,7 +46,9 @@ public sealed record WorldSnapshotMessage(
 // 20 Hz 的完整 RolesSnapshot 會在 50 ms 內把所有人校正回來。
 public sealed record PoseSnapshotMessage(RolePoseState[] Poses) : MpMessage, IHostMessage, IRunMessage, ILatestState;
 
-public sealed record RolesSnapshotMessage(RoleState[] Roles) : MpMessage, IHostMessage, IRunMessage, ILatestState;
+public sealed record LimitBreakState(bool Available, PartyRole? CastingRole, byte RecoveryMask,
+    long[] LastRequests, long CastingRequestId);
+public sealed record RolesSnapshotMessage(RoleState[] Roles, LimitBreakState? LimitBreak = null) : MpMessage, IHostMessage, IRunMessage, ILatestState;
 public sealed record WorldEventMessage(WorldEvent Event) : MpMessage, IHostMessage, IRunMessage;
 
 /// <summary>Host-authoritative run outcome. The peer only renders it: it never

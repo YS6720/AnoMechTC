@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using AnoMech.Core.SimObjects;
+using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
@@ -83,6 +84,9 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
     private delegate uint GetActionStatusDelegate(ActionManager* self, ActionType actionType, uint actionId,
         ulong targetId, byte checkRecastActive, byte checkCastingActive, uint* outOptExtraInfo);
     private readonly Hook<GetActionStatusDelegate> getActionStatusHook;
+    // Same Hotbar.CancelCast entrypoint as ClickLib; installed TC metadata:
+    // void(Hotbar*), signature 48 83 EC 38 33 D2 C7 44 24 ?? ?? ?? ?? ?? 45 33 C9.
+    private readonly Hook<Hotbar.Delegates.CancelCast> cancelCastHook;
 
     public LocalPlayerInputHooks(IGameInteropProvider hook)
     {
@@ -98,6 +102,8 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
             ActionManager.Addresses.UseActionLocation.Value, UseActionLocationDetour);
         getActionStatusHook = hook.HookFromAddress<GetActionStatusDelegate>(
             ActionManager.Addresses.GetActionStatus.Value, GetActionStatusDetour);
+        cancelCastHook = hook.HookFromAddress<Hotbar.Delegates.CancelCast>(
+            Hotbar.Addresses.CancelCast.Value, CancelCastDetour);
 
         rmiWalkHook.Enable();
         checkStrafeKeybindHook.Enable();
@@ -106,10 +112,13 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         useActionHook.Enable();
         useActionLocationHook.Enable();
         getActionStatusHook.Enable();
+        cancelCastHook.Enable();
+        Plugin.AddonLifecycle.RegisterListener(AddonEvent.PreRequestedUpdate, "_CastBar", SimCast.OnLocalCastBarUpdate);
     }
 
     public void Dispose()
     {
+        Plugin.AddonLifecycle.UnregisterListener(AddonEvent.PreRequestedUpdate, "_CastBar", SimCast.OnLocalCastBarUpdate);
         rmiWalkHook?.Dispose();
         checkStrafeKeybindHook?.Dispose();
         isInputIdPressedHook?.Dispose();
@@ -117,6 +126,28 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         useActionHook?.Dispose();
         useActionLocationHook?.Dispose();
         getActionStatusHook?.Dispose();
+        cancelCastHook?.Dispose();
+    }
+
+    private void CancelCastDetour(Hotbar* self)
+    {
+        cancelCastHook.Original(self);
+        var game = Plugin.GameInstance;
+        if (game is not { HasActivePractice: true } || !game.World.Map.IsInInstance ||
+            game.World.LimitBreaks is not { } runtime) return;
+        var role = game.World.Party.PlayerRole;
+        if (!game.IsNetworkPeer)
+        {
+            runtime.Cancel(role);
+            return;
+        }
+        var request = runtime.ActiveRequest(role);
+        var player = game.World.Party.Get(role);
+        if (request == 0 || player == null) return;
+        var native = player.BattleCharaPtr;
+        if (native != null)
+            game.Multiplayer?.SubmitAbilityUse(runtime.ActionFor(role), native->ClassJob, native->Level,
+                null, limitBreakRequestId: request, cancelLimitBreak: true);
     }
 
     private void RMIWalkDetour(void* self, float* sumLeft, float* sumForward, float* sumTurnLeft, byte* haveBackwardOrStrafe, byte* a6, byte bAdditiveUnk)
@@ -150,6 +181,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
     private void UpdateDetour(ActionManager* self)
     {
         updateHook.Original(self);
+        SimCast.UpdateLocalCastBar();
         if (!DisableAllActions) return;
         var autosOn = UIState.Instance()->WeaponState.AutoAttackState.IsAutoAttacking;
         if (autosOn) self->UseAction(ActionType.GeneralAction, 1);
@@ -194,8 +226,9 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
                 if (!row.TargetArea)
                 {
                     if (outOptAreaTargeted != null) *outOptAreaTargeted = false;
-                    var accepted = runtime.TryStart(game.World.Party.PlayerRole, lbAction,
-                        target: ResolveLimitBreakTarget(targetId));
+                    var accepted = StartPracticeLimitBreak(runtime, lbAction, null,
+                        ResolveLimitBreakTarget(targetId));
+                    CrashTrace.Log($"[LB] 確認施放 action={lbAction} accepted={accepted} ground=False");
                     if (accepted) actionUsedSincePoll = true;
                     return accepted ? (byte)1 : (byte)0;
                 }
@@ -232,7 +265,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
                 var row = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRow(lbAction);
                 if (row.TargetArea && location == null) return 0;
                 var localPoint = row.TargetArea ? game.World.Coordinates.ToLocal(*location) : (Vector3?)null;
-                var accepted = runtime.TryStart(game.World.Party.PlayerRole, lbAction, localPoint,
+                var accepted = StartPracticeLimitBreak(runtime, lbAction, localPoint,
                     ResolveLimitBreakTarget(targetId));
                 CrashTrace.Log($"[LB] 確認施放 action={lbAction} accepted={accepted} ground={row.TargetArea}");
                 if (accepted) actionUsedSincePoll = true;
@@ -255,8 +288,8 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         runtime = null!;
         action = 0;
         var game = Plugin.GameInstance;
-        if (game is not { HasActivePractice: true, IsNetworkPeer: false } ||
-            !game.World.Map.IsInInstance || game.Multiplayer?.HasSession == true ||
+        if (game is not { HasActivePractice: true } ||
+            !game.World.Map.IsInInstance ||
             game.World.LimitBreaks is not { } active)
             return false;
         var requested = type == ActionType.GeneralAction && id == Combat.TankLimitBreak.GeneralActionId ||
@@ -266,6 +299,26 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         runtime = active;
         action = active.ActionFor(game.World.Party.PlayerRole);
         return true;
+    }
+
+    private static bool StartPracticeLimitBreak(Combat.PracticeLimitBreakRuntime runtime,
+        uint action, Vector3? location, SimCharacter? target)
+    {
+        var game = Plugin.GameInstance;
+        if (game.Multiplayer is { HasSession: true } multiplayer)
+        {
+            if (game.World.Party.Get(game.World.Party.PlayerRole) is not { } player) return false;
+            var native = player.BattleCharaPtr;
+            if (native == null) return false;
+            var request = runtime.BeginRequest(game.World.Party.PlayerRole);
+            if (request == 0) return false;
+            var accepted = multiplayer.SubmitAbilityUse(action, native->ClassJob, native->Level,
+                target, location, request);
+            if (!accepted) runtime.RejectRequest(request);
+            return accepted;
+        }
+        return !game.IsNetworkPeer &&
+            runtime.TryStart(game.World.Party.PlayerRole, action, location, target);
     }
 
     private static SimObjects.SimCharacter? ResolveLimitBreakTarget(ulong targetId)

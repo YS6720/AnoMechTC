@@ -80,6 +80,17 @@ public static class WorldValidation
     {
         if (message is null || message.Roles is null || message.Roles.Length > MpLimits.Members)
             return false;
+        if (message.LimitBreak is { } lb)
+        {
+            if (lb.LastRequests is not { Length: MpLimits.Members } || lb.CastingRequestId < 0 ||
+                (lb.CastingRole is null && lb.CastingRequestId != 0) ||
+                lb.CastingRole is { } casting && (!MpValidation.Role(casting) || lb.Available ||
+                    (lb.RecoveryMask & (1 << (int)casting)) != 0 ||
+                    lb.CastingRequestId > lb.LastRequests[(int)casting]))
+                return false;
+            foreach (var request in lb.LastRequests)
+                if (request < 0) return false;
+        }
 
         var roles = new HashSet<PartyRole>();
         foreach (var role in message.Roles)

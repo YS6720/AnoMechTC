@@ -278,7 +278,7 @@ public sealed class MultiplayerSession : IDisposable
     public bool SubmitAbilityUse(AbilityUseMessage ability)
     {
         if (disposed || Identity is null || Phase != MultiplayerPhase.Running ||
-            !IsCurrent(scope) || game.Paused || !MpValidation.Validate(ability) ||
+            !IsCurrent(scope) || game.Paused && ability.LimitBreakRequestId == 0 || !MpValidation.Validate(ability) ||
             !members.TryGetValue(Identity.PeerId, out var member) || member.Role is not { } role)
             return false;
         try
@@ -511,7 +511,7 @@ public sealed class MultiplayerSession : IDisposable
             case AbilityUseMessage ability when IsHost:
                 // A press may race pause/prepare/retirement. Refuse that input;
                 // do not fall through to the fatal unknown-message branch.
-                if (Phase == MultiplayerPhase.Running && !game.Paused &&
+                if (Phase == MultiplayerPhase.Running && (!game.Paused || ability.LimitBreakRequestId > 0) &&
                     members.TryGetValue(packet.SenderId, out var actor) && actor.Role is { } actorRole)
                     game.ApplyAbilityUse(actorRole, ability);
                 break;
@@ -647,9 +647,11 @@ public sealed class MultiplayerSession : IDisposable
                 return;
     }
 
+    // A running world must survive even before the next roster event is drained.
+    // Only the prepare/check barrier requires the exact checked membership.
     private bool IsCurrent(RunScope candidate) => !disposed && candidate == scope &&
         candidate.Generation == generation && transport.Status == RelayStatus.Connected &&
-        transport.MembershipGeneration == runMembershipGeneration &&
+        (Phase == MultiplayerPhase.Running || transport.MembershipGeneration == runMembershipGeneration) &&
         Phase is MultiplayerPhase.Checking or MultiplayerPhase.Preparing or MultiplayerPhase.Running;
 
     private LobbyMember RequireMember(Guid peerId)

@@ -1,9 +1,13 @@
 using AnoMech.Core.Game;
 using AnoMech.Multiplayer;
 using AnoMech.Pointers;
+using Dalamud.Game.Addon.Lifecycle;
+using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
+using FFXIVClientStructs.FFXIV.Client.UI.Agent;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 using System;
 using System.Numerics;
 
@@ -39,7 +43,13 @@ public sealed unsafe class SimCast : ISimObject
     private float animationLock;
     private float remainingAnimationLock;
 
+    private static SimCharacter? localCastBarOwner;
+    private static SimCast? localCastBarClock;
+    private static uint localCastBarAction;
+    private static uint localCastBarAddon;
+
     public bool IsCasting => parent.BattleCharaPtr != null && parent.BattleCharaPtr->CastInfo.IsCasting;
+    internal bool IsManagedCasting => casting;
 
     public uint ActionId { get; private set; }
     public float Progress => total <= 0f ? 0f : Math.Clamp(elapsed / total, 0f, 1f);
@@ -67,7 +77,8 @@ public sealed unsafe class SimCast : ISimObject
     // the pre-fire facing snap; targetId, if set, makes the packet carry NumTargets=1
     // (some actions only animate on the caster when an entity target is delivered).
     // omenRotate is an offset added to the caster's facing (0 = aligned with parent.Rotation).
-    public bool Start(uint actionId, Vector3? localTargetLocation, float? castTime, GameObjectId? targetId, float omenDelay, float omenRotate, byte animationVariation, float animationLock, float? fireDelay = null)
+    // localOmenOrigin overrides only the cast telegraph; release still aims at localTargetLocation.
+    public bool Start(uint actionId, Vector3? localTargetLocation, float? castTime, GameObjectId? targetId, float omenDelay, float omenRotate, byte animationVariation, float animationLock, float? fireDelay = null, Vector3? localOmenOrigin = null)
     {
         var chara = parent.BattleCharaPtr;
         if (chara == null) return false;
@@ -100,8 +111,9 @@ public sealed unsafe class SimCast : ISimObject
         if (castTimeValue > 0)
         {
             var target = targetId ?? chara->GetGameObjectId();
-            NativeCast(actionId, ActionType.Action, omenDelay, castTimeValue, false, parent.Rotation + omenRotate, localTargetLocation, target);
+            NativeCast(actionId, ActionType.Action, omenDelay, castTimeValue, false, parent.Rotation + omenRotate, localOmenOrigin ?? localTargetLocation, target);
             total = chara->CastInfo.TotalCastTime;
+            if (parent is SimPlayer) localCastBarClock = this;
         }
         else
         {
@@ -128,6 +140,15 @@ public sealed unsafe class SimCast : ISimObject
     }
 
     public void NativeCast(uint actionId, ActionType actionType, float omenDelay, float castTime, bool interruptible, float? rotation = null, Vector3? position = null, GameObjectId? targetId = null, GameObjectId? ballistaId = null)
+    {
+        NativeCast(parent, coordinates, actionId, actionType, omenDelay, castTime, interruptible,
+            rotation, position, targetId, ballistaId);
+    }
+
+    internal static void NativeCast(SimCharacter parent, Coordinates coordinates, uint actionId,
+        ActionType actionType, float omenDelay, float castTime, bool interruptible,
+        float? rotation = null, Vector3? position = null, GameObjectId? targetId = null,
+        GameObjectId? ballistaId = null)
     {
         var omenDelayByte = (byte)(omenDelay * 10);
 
@@ -160,11 +181,43 @@ public sealed unsafe class SimCast : ISimObject
             PositionZ = qPosZ,
         };
 
-        if (ballistaId is not null)
-            parent.RecordNetworkUnsupported("cast ballista target");
-        parent.RecordNetworkCast(actionId, (byte)actionType, castTime, omenDelay,
-            interruptible, rot, localPos, targetId);
+        if (parent.NetworkEventSink is not null)
+        {
+            if (ballistaId is not null)
+                parent.RecordNetworkUnsupported("cast ballista target");
+            parent.RecordNetworkCast(actionId, (byte)actionType, castTime, omenDelay,
+                interruptible, rot, localPos, targetId);
+        }
         PacketDispatcherPointers.HandleActorCastPacket(parent.GameObjectId.ObjectId, &actorCastPacket);
+        // The client's ActorCast receiver does not initialize its own player.
+        // Simulated local casts have no ActionManager/server start to do that,
+        // so own their native cast clock just as the scenario owns completion.
+        if (parent is SimPlayer && parent.BattleCharaPtr is var chara && chara != null)
+        {
+            ref var cast = ref chara->CastInfo;
+            cast.ActionType = actionType;
+            cast.ActionId = actionId;
+            cast.SourceSequence = 0;
+            cast.TargetId = targetId ?? new GameObjectId { ObjectId = 0xE0000000 };
+            cast.TargetLocation = globalPos;
+            cast.Rotation = rot;
+            cast.CurrentCastTime = 0f;
+            cast.BaseCastTime = castTime;
+            cast.TotalCastTime = castTime;
+            cast.Interruptible = interruptible;
+            cast.IsCasting = true;
+            if (castTime > 0f)
+            {
+                // TC OpenCastBar publishes the normal HUD only; verified native
+                // body does not write ActionManager's cast state or send actions.
+                ActionManager.Instance()->OpenCastBar(chara, actionType, actionId, actionId, 0, 0f, castTime);
+                localCastBarOwner = parent;
+                localCastBarClock = null; // replicated casts use their native clock
+                localCastBarAction = actionId;
+                var hud = AgentHUD.Instance();
+                localCastBarAddon = hud == null ? 0 : hud->CastBarAddonId;
+            }
+        }
     }
 
     // Recorded releases have their own observed timestamp; do not let Tick also
@@ -222,12 +275,15 @@ public sealed unsafe class SimCast : ISimObject
             NumTargets = (byte)(nullActionTarget ? 0 : 1)
         };
 
-        if (ballistaId is not null)
-            parent.RecordNetworkUnsupported("action-effect ballista target");
-        parent.RecordNetworkActionEffect(actionId, animationLock, spellId,
-            animationVariaton, (byte)actionType, flags,
-            nullActionTarget ? [] : [actionTargetId!.Value], rot, localPos,
-            animationTargetId);
+        if (parent.NetworkEventSink is not null)
+        {
+            if (ballistaId is not null)
+                parent.RecordNetworkUnsupported("action-effect ballista target");
+            parent.RecordNetworkActionEffect(actionId, animationLock, spellId,
+                animationVariaton, (byte)actionType, flags,
+                nullActionTarget ? [] : [actionTargetId!.Value], rot, localPos,
+                animationTargetId);
+        }
 
         var targetEffects = new ActionEffectHandler.TargetEffects();
 
@@ -239,6 +295,7 @@ public sealed unsafe class SimCast : ISimObject
             &targetEffects,
             &actionTarget
             );
+        CompleteLocalCast(parent, chara, actionId, actionType);
 
         remainingAnimationLock = animationLock;
     }
@@ -250,6 +307,19 @@ public sealed unsafe class SimCast : ISimObject
         byte animationVariation, ActionType actionType, byte flags,
         ReadOnlySpan<GameObjectId> actionTargets, float? rotation, Vector3? position,
         GameObjectId? animationTargetId, GameObjectId? ballistaId)
+    {
+        NativeActionEffect(parent, coordinates, actionId, animationLock, spellId,
+            animationVariation, actionType, flags, actionTargets, rotation, position,
+            animationTargetId, ballistaId);
+        remainingAnimationLock = animationLock;
+        if (recordedCasting && ActionId == actionId) ResetCastState();
+    }
+
+    internal static void NativeActionEffect(SimCharacter parent, Coordinates coordinates,
+        uint actionId, float animationLock, ushort spellId, byte animationVariation,
+        ActionType actionType, byte flags, ReadOnlySpan<GameObjectId> actionTargets,
+        float? rotation, Vector3? position, GameObjectId? animationTargetId,
+        GameObjectId? ballistaId)
     {
         if (actionTargets.Length > byte.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(actionTargets));
@@ -281,11 +351,14 @@ public sealed unsafe class SimCast : ISimObject
             Flags = flags,
             NumTargets = (byte)count
         };
-        if (ballistaId is not null)
-            parent.RecordNetworkUnsupported("recorded action-effect ballista target");
-        parent.RecordNetworkActionEffect(actionId, animationLock, spellId,
-            animationVariation, (byte)actionType, flags, targets[..count].ToArray(),
-            rotation ?? parent.Rotation, position, animationTargetId);
+        if (parent.NetworkEventSink is not null)
+        {
+            if (ballistaId is not null)
+                parent.RecordNetworkUnsupported("recorded action-effect ballista target");
+            parent.RecordNetworkActionEffect(actionId, animationLock, spellId,
+                animationVariation, (byte)actionType, flags, targets[..count].ToArray(),
+                rotation ?? parent.Rotation, position, animationTargetId);
+        }
         Span<ActionEffectHandler.TargetEffects> effects =
             stackalloc ActionEffectHandler.TargetEffects[Math.Max(count, 1)];
         effects.Clear();
@@ -293,11 +366,88 @@ public sealed unsafe class SimCast : ISimObject
         fixed (ActionEffectHandler.TargetEffects* effectPtr = effects)
             ActionEffectHandler.Receive(parent.GameObjectId.ObjectId, (Character*)chara,
                 &globalPos, &header, effectPtr, targetPtr);
-        remainingAnimationLock = animationLock;
-        if (recordedCasting && ActionId == actionId) ResetCastState();
+        CompleteLocalCast(parent, chara, actionId, actionType);
     }
 
-    public void Tick(float deltaSeconds)
+    // Mark/project after ActionManager.Update, then re-project at the actual HUD
+    // consumer boundary so native HUD writers cannot replace the practice clock.
+    internal static void UpdateLocalCastBar()
+    {
+        if (localCastBarOwner == null) return;
+        var stage = AtkStage.Instance();
+        if (stage != null) ProjectLocalCastBar(stage->GetNumberArrayData(NumberArrayType.CastBar));
+    }
+
+    internal static void OnLocalCastBarUpdate(AddonEvent type, AddonArgs args)
+    {
+        if (localCastBarOwner == null || args is not AddonRequestedUpdateArgs request ||
+            request.NumberArrayData == 0 || request.Addon == 0 ||
+            ((AtkUnitBase*)request.Addon.Address)->Id != localCastBarAddon) return;
+        ProjectLocalCastBar(((NumberArrayData**)request.NumberArrayData)[(int)NumberArrayType.CastBar]);
+    }
+
+    private static void ProjectLocalCastBar(NumberArrayData* numbers)
+    {
+        if (localCastBarOwner is not { } owner) return;
+        var chara = owner.BattleCharaPtr;
+        var clock = localCastBarClock;
+        if (chara == null || (clock != null
+                ? !clock.casting || clock.ActionId != localCastBarAction
+                : !chara->CastInfo.IsCasting || chara->CastInfo.ActionId != localCastBarAction))
+        {
+            CloseLocalCastBar(owner);
+            return;
+        }
+        if (numbers == null || numbers->Size < 6) return;
+        var duration = clock?.total ?? chara->CastInfo.TotalCastTime;
+        var time = Math.Clamp(clock?.elapsed ?? chara->CastInfo.CurrentCastTime, 0f, duration);
+        // TC OpenCastBar uses centiseconds at 2/3 and integer percent at 4.
+        numbers->SetValue(2, (int)(time * 100f), force: true);
+        numbers->SetValue(3, (int)(duration * 100f), force: true);
+        numbers->SetValue(4, duration > 0f ? (int)(time / duration * 100f) : 0, force: true);
+        // TC _CastBar skips its countdown refresh when array[5] is interrupted.
+        // An owned cast ends only through release/Despawn, not native expiry.
+        if (clock != null) numbers->SetValue(5, 0, force: true);
+    }
+
+    internal static void CloseLocalCastBar(SimCharacter owner)
+    {
+        if (!ReferenceEquals(localCastBarOwner, owner)) return;
+        var hud = AgentHUD.Instance();
+        var stage = AtkStage.Instance();
+        if (hud != null && stage != null && localCastBarAddon != 0 &&
+            hud->CastBarAddonId == localCastBarAddon && stage->RaptureAtkUnitManager != null)
+        {
+            var addon = stage->RaptureAtkUnitManager->GetAddonById((ushort)localCastBarAddon);
+            if (addon != null) addon->Close(true);
+            hud->CastBarAddonId = 0;
+        }
+        localCastBarOwner = null;
+        localCastBarClock = null;
+        localCastBarAddon = 0;
+        localCastBarAction = 0;
+    }
+
+    private static void CompleteLocalCast(SimCharacter parent, BattleChara* chara,
+        uint actionId, ActionType actionType)
+    {
+        // Pair local synthetic start/finish even when the native receiver leaves
+        // CastInfo untouched; an unrelated effect must not cancel this cast.
+        if (parent is SimPlayer && chara->CastInfo.ActionId == actionId &&
+            chara->CastInfo.ActionType == actionType)
+        {
+            CloseLocalCastBar(parent);
+            chara->CastInfo.IsCasting = false;
+            chara->CastInfo.ActionId = 0;
+            chara->CastInfo.ActionType = 0;
+        }
+    }
+
+    public void Tick(float deltaSeconds) => Advance(deltaSeconds, null);
+
+    internal void TickOwned(float deltaSeconds, float castElapsed) => Advance(deltaSeconds, castElapsed);
+
+    private void Advance(float deltaSeconds, float? castElapsed)
     {
         if (remainingAnimationLock > 0f)
         {
@@ -323,8 +473,9 @@ public sealed unsafe class SimCast : ISimObject
             return;
         }
 
-        var castInfo = chara->CastInfo;
-        elapsed = castInfo.CurrentCastTime;
+        elapsed = castElapsed ?? chara->CastInfo.CurrentCastTime;
+        if (castElapsed != null)
+            chara->CastInfo.CurrentCastTime = MathF.Min(elapsed, total);
 
         if (elapsed >= total)
         {
@@ -357,6 +508,7 @@ public sealed unsafe class SimCast : ISimObject
     // 20260529_193455).
     public void Despawn()
     {
+        CloseLocalCastBar(parent);
         var chara = parent.BattleCharaPtr;
         if (chara != null)
         {
@@ -370,6 +522,7 @@ public sealed unsafe class SimCast : ISimObject
 
     private void ResetCastState()
     {
+        if (ReferenceEquals(localCastBarClock, this)) CloseLocalCastBar(parent);
         casting = false;
         recordedCasting = false;
         targetLocation = null;

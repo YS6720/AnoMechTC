@@ -154,7 +154,10 @@ public static class MpValidation
         SelfPoseMessage pose => Pose(pose.Pose),
         AbilityUseMessage ability => ability.ActionId != 0 && ability.ClassJob != 0 &&
             ability.Level is >= 1 and <= 100 &&
-            (ability.Target is not { } target || WorldValidation.ValidateEntity(target)),
+            (ability.Target is not { } target || WorldValidation.ValidateEntity(target)) &&
+            (ability.Location is not { } location || Position(location)) &&
+            ability.LimitBreakRequestId >= 0 &&
+            (!ability.CancelLimitBreak || ability.LimitBreakRequestId > 0 && ability.Location == null && ability.Target == null),
         RunStatusMessage status => Enum.IsDefined(status.Outcome) &&
             status.ConsecutiveWins is >= 0 and <= MpLimits.Streak &&
             Finite(status.RetrySeconds) &&

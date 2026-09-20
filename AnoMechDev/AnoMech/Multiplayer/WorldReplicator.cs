@@ -389,10 +389,18 @@ public sealed unsafe class WorldReplicator : IDisposable
             {
                 if (e.ActionType != (byte)ActionType.Action || !resources.TryValidateAction(e.ActionId))
                     throw Failure(MpError.UnsupportedResource);
-                var actor = ResolveActor(e.Actor) as SimEnemy ?? throw Failure(MpError.InvalidMessage);
+                var actor = ResolveActor(e.Actor);
                 GameObjectId? target = e.Target is { } targetEntity ? ResolveEntity(targetEntity).GameObjectId : null;
-                NativeCall(() => actor.NativeCast(e.ActionId, (ActionType)e.ActionType, e.OmenDelay,
-                    e.CastSeconds, e.Interruptible, e.Rotation, e.Position?.ToVector(), target));
+                NativeCall(() =>
+                {
+                    if (actor is SimEnemy enemy)
+                        enemy.NativeCast(e.ActionId, (ActionType)e.ActionType, e.OmenDelay,
+                            e.CastSeconds, e.Interruptible, e.Rotation, e.Position?.ToVector(), target);
+                    else
+                        SimCast.NativeCast(actor, world.Coordinates, e.ActionId, (ActionType)e.ActionType,
+                            e.OmenDelay, e.CastSeconds, e.Interruptible, e.Rotation,
+                            e.Position?.ToVector(), target);
+                });
                 break;
             }
             case NativeActionEffectEvent e:
@@ -400,13 +408,21 @@ public sealed unsafe class WorldReplicator : IDisposable
                 if (e.ActionType != (byte)ActionType.Action || !resources.TryValidateAction(e.ActionId) ||
                     (e.SpellId != 0 && !resources.TryValidateAction(e.SpellId)))
                     throw Failure(MpError.UnsupportedResource);
-                var actor = ResolveActor(e.Actor) as SimEnemy ?? throw Failure(MpError.InvalidMessage);
+                var actor = ResolveActor(e.Actor);
                 var targets = e.Targets.Select(entity => ResolveEntity(entity).GameObjectId).ToArray();
                 GameObjectId? animationTarget = e.AnimationTarget is { } animationEntity
                     ? ResolveEntity(animationEntity).GameObjectId : null;
-                NativeCall(() => actor.NativeActionEffect(e.ActionId, e.AnimationLock, e.SpellId,
-                    e.AnimationVariation, (ActionType)e.ActionType, e.Flags, targets,
-                    e.Rotation, e.Position?.ToVector(), animationTarget, null));
+                NativeCall(() =>
+                {
+                    if (actor is SimEnemy enemy)
+                        enemy.NativeActionEffect(e.ActionId, e.AnimationLock, e.SpellId,
+                            e.AnimationVariation, (ActionType)e.ActionType, e.Flags, targets,
+                            e.Rotation, e.Position?.ToVector(), animationTarget, null);
+                    else
+                        SimCast.NativeActionEffect(actor, world.Coordinates, e.ActionId, e.AnimationLock,
+                            e.SpellId, e.AnimationVariation, (ActionType)e.ActionType, e.Flags,
+                            targets, e.Rotation, e.Position?.ToVector(), animationTarget, null);
+                });
                 break;
             }
             case ActorVfxEvent e:

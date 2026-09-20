@@ -10,7 +10,7 @@ namespace AnoMech.Multiplayer;
 // never accepted from the application payload. No compatibility fallback.
 public static class MpLimits
 {
-    public const int ProtocolVersion = 9;
+    public const int ProtocolVersion = 10;
     public const string ProtocolName = "anomech-tc";
     public const int Members = 8;
     public const int Rooms = 4;
@@ -170,7 +170,8 @@ public sealed record PartyMarkerAck(Guid PeerId, long RequestId);
 // 改成直接搬擁有者的動畫 id，替身播什麼由來源端決定。
 public sealed record SelfPoseMessage(MpPose Pose, bool IsMoving, bool IsActing, ushort Timeline = 0)
     : MpMessage, IPeerMessage, IRunMessage, ILatestState;
-public sealed record AbilityUseMessage(uint ActionId, byte ClassJob, byte Level, MpEntity? Target)
+public sealed record AbilityUseMessage(uint ActionId, byte ClassJob, byte Level, MpEntity? Target,
+    MpVector? Location = null, long LimitBreakRequestId = 0, bool CancelLimitBreak = false)
     : MpMessage, IPeerMessage, IRunMessage;
 
 // The relay stamps RoomId, SenderId and IsHost. Sequence is monotonically
