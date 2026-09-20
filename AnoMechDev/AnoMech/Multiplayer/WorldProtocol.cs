@@ -33,7 +33,9 @@ public sealed record RolePoseState(PartyRole Role, bool Dead, MpPose Pose, ushor
 
 // Timeline＝該成員當下的 base ActionTimeline（slot 0），讓替身播出來源端真正在播的動畫。
 public sealed record RoleState(PartyRole Role, bool Dead, MpPose Pose, StatusState[] Statuses, float HpFraction,
-    ushort Timeline = 0);
+    ushort Timeline = 0, JobResourceState? Resources = null);
+public readonly record struct JobResourceState(byte ClassJob, long Revision, byte Addersting, bool DarkArts,
+    int KenkiGained = 0);
 public sealed record EventObjectState(int NetId, uint EobjId, uint LayoutId, ushort TimelineState, ushort CurrentState, MpPose Pose);
 public sealed record TetherState(int NetId, ushort TetherId, MpEntity Source, MpEntity Target);
 public sealed record StaticVisualState(int NetId, string ResourceKey, MpVector Position, MpQuaternion Rotation, MpVector Scale);

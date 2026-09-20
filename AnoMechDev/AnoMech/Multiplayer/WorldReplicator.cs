@@ -151,7 +151,7 @@ public sealed unsafe class WorldReplicator : IDisposable
             var (health, maxHealth) = ReadHealth(member);
             var hpFraction = maxHealth == 0 ? 0f : Math.Clamp((float)health / maxHealth, 0f, 1f);
             roles[i] = new RoleState(role, partyMember.Dead, pose,
-                CaptureStatuses(member), hpFraction, member.CurrentActionTimeline);
+                CaptureStatuses(member), hpFraction, member.CurrentActionTimeline, game.Abilities.JobResourceState(role));
         }
         var snapshot = new RolesSnapshotMessage(roles);
         if (!WorldValidation.Validate(snapshot)) throw Failure(MpError.InvalidMessage);
@@ -361,6 +361,9 @@ public sealed unsafe class WorldReplicator : IDisposable
                     if (!state.Dead) member.ApplyNetworkHealthFraction(state.HpFraction);
                 }
                 member.ApplyNetworkStatuses(state.Statuses, statusSourceResolver);
+                if (state.Role == localRole && state.Resources is { } feedback)
+                    Core.Combat.Jobs.LocalJobResources.ApplyResourceFeedback(feedback.ClassJob, feedback.Revision,
+                        feedback.Addersting, feedback.DarkArts, feedback.KenkiGained);
             });
         }
     }

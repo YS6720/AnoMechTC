@@ -25,6 +25,7 @@ using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
+using AnoMech.Core.Combat;
 
 namespace AnoMech.Core.Game;
 
@@ -291,19 +292,19 @@ public sealed partial class Game : IDisposable
         Zones = zoneOrder;
     }
 
-    internal void SubmitAbility(uint actionId, byte classJob, byte level, ulong targetId)
+    internal bool SubmitAbility(uint actionId, byte classJob, byte level, ulong targetId, long requestId,
+        Vector3? location = null)
     {
-        if (Paused || !World.Map.IsInInstance || !HasActivePractice) return;
+        if (Paused || !World.Map.IsInInstance || !HasActivePractice) return false;
         var hasTarget = (uint)targetId is not (0 or 0xE0000000);
         var target = hasTarget ? ResolveAbilityActor(targetId) : null;
-        if (hasTarget && target is null) return;
+        if (hasTarget && target is null) return false;
         if (Multiplayer?.HasSession == true)
-        {
-            Multiplayer.SubmitAbilityUse(actionId, classJob, level, target);
-            return;
-        }
-        if (!networkPeer)
-            Abilities.TryUse(World.Party.PlayerRole, actionId, classJob, level, target);
+            return Multiplayer.SubmitAbilityUse(actionId, classJob, level, target, location, actionRequestId: requestId);
+        if (networkPeer) return false;
+        var accepted = Abilities.TryUse(World.Party.PlayerRole, actionId, classJob, level, target, out var comboOk, location);
+        RotationSim.Instance?.CompleteOrdinaryAction(requestId, accepted, accepted && comboOk);
+        return true;
     }
 
     internal SimCharacter? ResolveAbilityActor(ulong targetId)

@@ -37,6 +37,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
     // intent *before* the stun-zeroing. This is intent/input based (matches cast-cancel semantics),
     // not a position delta. Holds its last value on frames where RMIWalk doesn't fire.
     public bool MovementInputActive { get; private set; }
+    public bool TurningInputActive { get; private set; }
 
     // True while the player's weapon auto-attack is swinging.
     public bool IsAutoAttacking => UIState.Instance()->WeaponState.AutoAttackState.IsAutoAttacking;
@@ -133,6 +134,8 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
     {
         cancelCastHook.Original(self);
         var game = Plugin.GameInstance;
+        if (game is { HasActivePractice: true } && game.World.Map.IsInInstance)
+            Combat.RotationSim.Instance?.CancelOrdinaryCast();
         if (game is not { HasActivePractice: true } || !game.World.Map.IsInInstance ||
             game.World.LimitBreaks is not { } runtime) return;
         var role = game.World.Party.PlayerRole;
@@ -156,6 +159,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         // Capture the engine's movement sample as the player's true movement intent, before any
         // stun-zeroing below. (self is a MoveControllerSubMemberForMine*; the sums are its move vector.)
         MovementInputActive = *sumLeft != 0 || *sumForward != 0;
+        TurningInputActive = *sumTurnLeft != 0;
         if (!ZeroMovement) return;
         *sumLeft = 0;
         *sumForward = 0;
@@ -277,7 +281,20 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
             CrashTrace.Log($"[LB] 地面施放處理失敗：{ex.Message}");
             return 0;
         }
+        var rotation = Combat.RotationSim.Instance;
+        var ordinaryGround = actionType == ActionType.Action && rotation != null &&
+            Plugin.GameInstance is { HasActivePractice: true } practice && practice.World.Map.IsInInstance &&
+            Combat.Jobs.JobRules.Supports((byte)Plugin.PlayerState.ClassJob.RowId) &&
+            Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(actionId)?.TargetArea == true;
+        var manaCost = 0;
+        var idle = false;
+        var sequenceBefore = self->LastUsedActionSequence;
+        if (ordinaryGround && (location == null || !rotation!.PrepareGroundAction(self, actionId, out manaCost, out idle)))
+            return 0;
         var result = useActionLocationHook.Original(self, actionType, actionId, targetId, location, extraParam, a7);
+        if (ordinaryGround)
+            rotation!.CompleteGroundAction(self, actionId, Plugin.GameInstance.World.Coordinates.ToLocal(*location),
+                sequenceBefore, manaCost, idle, result);
         if (result != 0) actionUsedSincePoll = true;
         return result;
     }

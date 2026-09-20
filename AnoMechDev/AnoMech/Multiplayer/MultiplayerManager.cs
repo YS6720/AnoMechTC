@@ -468,15 +468,16 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
         if (game.World.Party.Get(role) is SimNetworkPuppet puppet) puppet.Orphan();
     }
     internal bool SubmitAbilityUse(uint actionId, byte classJob, byte level, SimCharacter? target,
-        Vector3? location = null, long limitBreakRequestId = 0, bool cancelLimitBreak = false)
+        Vector3? location = null, long limitBreakRequestId = 0, bool cancelLimitBreak = false, long actionRequestId = 0)
     {
         if (Session is not { Phase: MultiplayerPhase.Running } session ||
             replicator is null || !replicator.TryMapAbilityTarget(target, out var entity)) return false;
         return session.SubmitAbilityUse(new AbilityUseMessage(actionId, classJob, level, entity,
-            location is { } point ? MpVector.From(point) : null, limitBreakRequestId, cancelLimitBreak));
+            location is { } point ? MpVector.From(point) : null, limitBreakRequestId, cancelLimitBreak, actionRequestId));
     }
-    public bool ApplyAbilityUse(PartyRole role, AbilityUseMessage ability)
+    public bool ApplyAbilityUse(PartyRole role, AbilityUseMessage ability, out bool comboOk)
     {
+        comboOk = false;
         if (Session is not { IsHost: true, Phase: MultiplayerPhase.Running } ||
             replicator is null || !MpValidation.Validate(ability)) return false;
         SimCharacter? target = null;
@@ -493,9 +494,19 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
             }
             if (isLimitBreak) return false;
         }
-        if (game.Paused || !targetValid || ability.Location != null ||
+        if (game.Paused || !targetValid ||
             ability.LimitBreakRequestId != 0 || ability.CancelLimitBreak) return false;
-        return game.Abilities.TryUse(role, ability.ActionId, ability.ClassJob, ability.Level, target);
+        return game.Abilities.TryUse(role, ability.ActionId, ability.ClassJob, ability.Level, target,
+            out comboOk, ability.Location?.ToVector());
+    }
+    public JobResourceState? CaptureJobResources(PartyRole role) => game.Abilities.JobResourceState(role);
+    public void ApplyAbilityResult(AbilityResultMessage result)
+    {
+        if (result.Role != game.World.Party.PlayerRole) return;
+        Core.Combat.RotationSim.Instance?.CompleteOrdinaryAction(result.ActionRequestId, result.Accepted, result.ComboOk);
+        if (result.Resources is { } feedback)
+            Core.Combat.Jobs.LocalJobResources.ApplyResourceFeedback(feedback.ClassJob, feedback.Revision,
+                feedback.Addersting, feedback.DarkArts, feedback.KenkiGained);
     }
     public void ResetAbilityState() => game.Abilities.Reset();
     public IReadOnlyList<PartyMarkerRequestMessage> CaptureLocalPartyMarkers() => Replicator.CaptureLocalPartyMarkers();

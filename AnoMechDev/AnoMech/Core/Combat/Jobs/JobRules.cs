@@ -15,34 +15,52 @@ internal interface IJobStatusRules
     bool IsKnownAction(uint actionId);
     /// <summary>Statuses this action may grant or consume; the recorded catalog must not replay them.</summary>
     IReadOnlyList<ushort> TouchedStatuses(uint actionId, bool comboOk);
-    void Apply(uint actionId, bool comboOk, SimCharacter player, PartyRole sourceRole);
+    void Apply(in JobActionContext context);
+    void OnPartyAction(in JobActionContext context, SimCharacter actor) { }
+    void OnMechanicHit(in JobActionContext context, SimCharacter target) { }
+    void Tick(in JobActionContext context, float deltaSeconds) { }
+    void ResetStatusState() { }
 }
 
 /// <summary>
-/// Job gauge for the local player's own character only. Gauges live in this client's
-/// memory; nobody else can write them and nobody needs to read them over the wire.
-/// Runs on every client (host or peer) from its own UseAction, never replicated.
+/// Job gauge for the local player's own character only. Only this client writes
+/// its native gauge; host-owned shield resource feedback is projected locally.
+/// Ordinary completed actions and timers never write another player's gauge.
 /// </summary>
 internal interface IJobGaugeRules
 {
-    void OnLocalFire(uint actionId, bool comboOk);
-    void Reset();
-    /// <summary>Per-frame, only inside a running practice: gauges that fill over time.</summary>
-    void Tick(float deltaSeconds) { }
+    void OnLocalFire(uint actionId, bool comboOk, byte level);
+    void Reset(byte level);
+    /// <summary>Per-frame, only inside a running practice; pause freezes these timers.</summary>
+    void Tick(float deltaSeconds, byte level) { }
+    bool AllowsNaturalManaRecovery => true;
 }
 
 internal static class JobRules
 {
-    // 武士（2026-09-16）尚未定案：天道居合被拒原因、明鏡止水充能顯示都還沒收斂，
-    // 維護者裁示先告一段落。只在開發者版啟用，公開版不帶半成品。
+    // One host status owner and one local native gauge writer per supported job.
     private static readonly Dictionary<byte, IJobStatusRules> StatusRules = new()
     {
         [Paladin.JobId] = Paladin.Instance,
+        [Samurai.JobId] = Samurai.Instance,
+        [Reaper.JobId] = Reaper.Instance,
+        [Machinist.JobId] = Machinist.Instance,
+        [BlackMage.JobId] = BlackMage.Instance,
+        [WhiteMage.JobId] = WhiteMage.Instance,
+        [Sage.JobId] = Sage.Instance,
+        [DarkKnight.JobId] = DarkKnight.Instance,
     };
 
     private static readonly Dictionary<byte, IJobGaugeRules> GaugeRules = new()
     {
         [Paladin.JobId] = Paladin.Instance,
+        [Samurai.JobId] = Samurai.Instance,
+        [Reaper.JobId] = Reaper.Instance,
+        [Machinist.JobId] = Machinist.Instance,
+        [BlackMage.JobId] = BlackMage.Instance,
+        [WhiteMage.JobId] = WhiteMage.Instance,
+        [Sage.JobId] = Sage.Instance,
+        [DarkKnight.JobId] = DarkKnight.Instance,
     };
 
     internal static IJobStatusRules? StatusesFor(byte classJob)
@@ -55,18 +73,40 @@ internal static class JobRules
         return false;
     }
 
-    internal static void OnLocalFire(byte classJob, uint actionId, bool comboOk)
+    internal static void OnLocalFire(byte classJob, uint actionId, bool comboOk, byte level)
     {
-        if (GaugeRules.TryGetValue(classJob, out var rules)) rules.OnLocalFire(actionId, comboOk);
+        if (GaugeRules.TryGetValue(classJob, out var rules)) rules.OnLocalFire(actionId, comboOk, level);
     }
 
-    internal static void ResetLocalGauge()
+    internal static void ResetLocalGauge(byte level)
     {
-        foreach (var rules in GaugeRules.Values) rules.Reset();
+        foreach (var rules in GaugeRules.Values) rules.Reset(level);
     }
 
-    internal static void TickLocalGauge(byte classJob, float deltaSeconds)
+    internal static void TickLocalGauge(byte classJob, float deltaSeconds, byte level)
     {
-        if (GaugeRules.TryGetValue(classJob, out var rules)) rules.Tick(deltaSeconds);
+        if (GaugeRules.TryGetValue(classJob, out var rules)) rules.Tick(deltaSeconds, level);
+    }
+
+    internal static bool Supports(byte classJob) => GaugeRules.ContainsKey(classJob);
+    internal static bool AllowsNaturalManaRecovery(byte classJob)
+        => !GaugeRules.TryGetValue(classJob, out var rules) || rules.AllowsNaturalManaRecovery;
+
+    internal static bool IsAvailableAction(Lumina.Excel.Sheets.Action action, byte classJob, byte level)
+    {
+        if (action.IsPvP || action.ClassJobLevel == 0 || action.ClassJobLevel > level) return false;
+        var jobs = action.ClassJobCategory.Value;
+        return classJob switch
+        {
+            Samurai.JobId => jobs.SAM,
+            Reaper.JobId => jobs.RPR,
+            Machinist.JobId => jobs.MCH,
+            BlackMage.JobId => jobs.BLM,
+            WhiteMage.JobId => jobs.WHM,
+            Sage.JobId => jobs.SGE,
+            DarkKnight.JobId => jobs.DRK,
+            Paladin.JobId => jobs.PLD,
+            _ => false,
+        };
     }
 }

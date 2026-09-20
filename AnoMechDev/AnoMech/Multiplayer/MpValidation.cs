@@ -156,8 +156,11 @@ public static class MpValidation
             ability.Level is >= 1 and <= 100 &&
             (ability.Target is not { } target || WorldValidation.ValidateEntity(target)) &&
             (ability.Location is not { } location || Position(location)) &&
-            ability.LimitBreakRequestId >= 0 &&
+            ability.LimitBreakRequestId >= 0 && ability.ActionRequestId >= 0 &&
+            (ability.LimitBreakRequestId > 0 ? ability.ActionRequestId == 0 : ability.ActionRequestId > 0) &&
             (!ability.CancelLimitBreak || ability.LimitBreakRequestId > 0 && ability.Location == null && ability.Target == null),
+        AbilityResultMessage result => Role(result.Role) && result.ActionRequestId > 0 &&
+            (result.Accepted || !result.ComboOk) && WorldValidation.ValidateJobResources(result.Resources),
         RunStatusMessage status => Enum.IsDefined(status.Outcome) &&
             status.ConsecutiveWins is >= 0 and <= MpLimits.Streak &&
             Finite(status.RetrySeconds) &&

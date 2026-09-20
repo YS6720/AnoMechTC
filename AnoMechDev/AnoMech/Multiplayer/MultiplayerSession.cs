@@ -23,6 +23,7 @@ public sealed class MultiplayerSession : IDisposable
     private readonly HashSet<Guid> seenRuns = new();
     private readonly HashSet<Guid> checkedPeers = new();
     private readonly HashSet<Guid> preparedPeers = new();
+    private readonly AbilityResultMessage?[] lastAbilityResults = new AbilityResultMessage?[MpLimits.Members];
     private LobbyMember[] roster = [];
     private RunDescriptor? descriptor;
     private RunScope scope;
@@ -283,9 +284,27 @@ public sealed class MultiplayerSession : IDisposable
             return false;
         try
         {
-            return IsHost ? game.ApplyAbilityUse(role, ability) : Send(scope.RunId, ability);
+            if (!IsHost) return Send(scope.RunId, ability);
+            if (ability.ActionRequestId == 0) return game.ApplyAbilityUse(role, ability, out _);
+            game.ApplyAbilityResult(ApplyOrdinaryAbility(role, ability));
+            return true;
         }
         catch (Exception ex) { Fail(ex); return false; }
+    }
+
+    private AbilityResultMessage ApplyOrdinaryAbility(PartyRole role, AbilityUseMessage ability)
+    {
+        var previous = lastAbilityResults[(int)role];
+        if (previous is not null && ability.ActionRequestId <= previous.ActionRequestId)
+            return ability.ActionRequestId == previous.ActionRequestId ? previous :
+                new AbilityResultMessage(role, ability.ActionRequestId, false, false, game.CaptureJobResources(role));
+        // Reserve the id before invoking effects, including a rejected request.
+        lastAbilityResults[(int)role] = new AbilityResultMessage(role, ability.ActionRequestId, false, false, null);
+        var accepted = game.ApplyAbilityUse(role, ability, out var comboOk);
+        var result = new AbilityResultMessage(role, ability.ActionRequestId, accepted,
+            accepted && comboOk, game.CaptureJobResources(role));
+        lastAbilityResults[(int)role] = result;
+        return result;
     }
 
     public MpError Start(RunDescriptor run, double now)
@@ -511,9 +530,18 @@ public sealed class MultiplayerSession : IDisposable
             case AbilityUseMessage ability when IsHost:
                 // A press may race pause/prepare/retirement. Refuse that input;
                 // do not fall through to the fatal unknown-message branch.
-                if (Phase == MultiplayerPhase.Running && (!game.Paused || ability.LimitBreakRequestId > 0) &&
+                if (Phase == MultiplayerPhase.Running &&
                     members.TryGetValue(packet.SenderId, out var actor) && actor.Role is { } actorRole)
-                    game.ApplyAbilityUse(actorRole, ability);
+                {
+                    if (ability.ActionRequestId > 0)
+                        Send(scope.RunId, ApplyOrdinaryAbility(actorRole, ability));
+                    else if (!game.Paused || ability.LimitBreakRequestId > 0)
+                        game.ApplyAbilityUse(actorRole, ability, out _);
+                }
+                break;
+            case AbilityResultMessage result when !IsHost && Phase == MultiplayerPhase.Running:
+                if (members.TryGetValue(identity.PeerId, out var localMember) && localMember.Role == result.Role)
+                    game.ApplyAbilityResult(result);
                 break;
             case ControlRequestMessage request when IsHost && Phase == MultiplayerPhase.Running:
                 HandleControl(packet.SenderId, request.Control);
@@ -554,6 +582,7 @@ public sealed class MultiplayerSession : IDisposable
         checkedPeers.Clear();
         preparedPeers.Clear();
         game.ResetAbilityState();
+        Array.Clear(lastAbilityResults);
         localPrepared = prepareSent = false;
         lastRunStatus = null;
         LastError = MpError.None;
@@ -756,6 +785,7 @@ public sealed class MultiplayerSession : IDisposable
         checkedPeers.Clear();
         preparedPeers.Clear();
         game.ResetAbilityState();
+        Array.Clear(lastAbilityResults);
         LastError = reason;
         if (ownsNativeRun)
         {
@@ -809,6 +839,7 @@ public sealed class MultiplayerSession : IDisposable
         ++generation;
         scope = default;
         game.ResetAbilityState();
+        Array.Clear(lastAbilityResults);
         // Abort network first; native cleanup cannot race a live queued dispatch.
         transport.Dispose();
         LastError = reason;

@@ -141,8 +141,14 @@ public static class WorldValidation
         return role is not null && Enum.IsDefined(role.Role) &&
             ValidatePose(role.Pose) &&
             ValidateStatuses(role.Statuses) &&
-            FiniteRange(role.HpFraction, 0f, 1f);
+            FiniteRange(role.HpFraction, 0f, 1f) && ValidateJobResources(role.Resources);
     }
+    public static bool ValidateJobResources(JobResourceState? resources)
+        => resources is not { } value || value.Revision >= 0 &&
+            (value.ClassJob == 40 && value.Addersting <= 3 && !value.DarkArts && value.KenkiGained == 0 ||
+             value.ClassJob == 32 && value.Addersting == 0 && value.KenkiGained == 0 ||
+             value.ClassJob == 34 && value.Addersting == 0 && !value.DarkArts && value.KenkiGained >= 0 &&
+                 value.KenkiGained % 10 == 0);
     public static bool ValidatePartyMarker(PartyMarkerState marker)
         => marker is not null && Enum.IsDefined(marker.Role) && Enum.IsDefined(marker.Sign);
 

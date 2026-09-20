@@ -10,7 +10,7 @@ namespace AnoMech.Multiplayer;
 // never accepted from the application payload. No compatibility fallback.
 public static class MpLimits
 {
-    public const int ProtocolVersion = 10;
+    public const int ProtocolVersion = 11;
     public const string ProtocolName = "anomech-tc";
     public const int Members = 8;
     public const int Rooms = 4;
@@ -133,6 +133,7 @@ public sealed record RunDescriptor(
 [JsonDerivedType(typeof(PartyMarkerRequestMessage), "party-marker")]
 [JsonDerivedType(typeof(SelfPoseMessage), "pose")]
 [JsonDerivedType(typeof(AbilityUseMessage), "ability")]
+[JsonDerivedType(typeof(AbilityResultMessage), "ability-result")]
 [JsonDerivedType(typeof(WorldSnapshotMessage), "world")]
 [JsonDerivedType(typeof(RolesSnapshotMessage), "roles")]
 [JsonDerivedType(typeof(PoseSnapshotMessage), "poses")]
@@ -171,8 +172,10 @@ public sealed record PartyMarkerAck(Guid PeerId, long RequestId);
 public sealed record SelfPoseMessage(MpPose Pose, bool IsMoving, bool IsActing, ushort Timeline = 0)
     : MpMessage, IPeerMessage, IRunMessage, ILatestState;
 public sealed record AbilityUseMessage(uint ActionId, byte ClassJob, byte Level, MpEntity? Target,
-    MpVector? Location = null, long LimitBreakRequestId = 0, bool CancelLimitBreak = false)
+    MpVector? Location = null, long LimitBreakRequestId = 0, bool CancelLimitBreak = false, long ActionRequestId = 0)
     : MpMessage, IPeerMessage, IRunMessage;
+public sealed record AbilityResultMessage(PartyRole Role, long ActionRequestId, bool Accepted,
+    bool ComboOk, JobResourceState? Resources) : MpMessage, IHostMessage, IRunMessage;
 
 // The relay stamps RoomId, SenderId and IsHost. Sequence is monotonically
 // increasing per sending socket, including lobby/run lifecycle barriers.

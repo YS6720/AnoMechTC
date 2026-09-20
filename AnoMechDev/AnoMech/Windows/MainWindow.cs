@@ -68,12 +68,10 @@ public unsafe class MainWindow : Window, IDisposable
     public MainWindow(Plugin plugin)
         : base(TitleWithVersion())
     {
-        SizeConstraints = new WindowSizeConstraints
-        {
-            MinimumSize = new Vector2(220, 80),
-            MaximumSize = new Vector2(float.MaxValue, float.MaxValue)
-        };
-        Flags |= ImGuiWindowFlags.AlwaysAutoResize;
+        // 固定邏輯尺寸，避免分頁內容改變時自動收縮；由 Dalamud 套用 UI 縮放。
+        Size = new Vector2(800, 600);
+        SizeCondition = ImGuiCond.Always;
+        Flags |= ImGuiWindowFlags.NoResize;
 
         this.plugin = plugin;
         multiplayerPanel = new MultiplayerPanel(plugin);

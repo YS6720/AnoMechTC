@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
 using AnoMech.Core.Combat.Jobs;
 using AnoMech.Core.Game;
 using AnoMech.Core.Game.Party;
@@ -21,12 +22,6 @@ internal sealed class RecordedAbilityRuntime
     private const float SprintDuration = 10f;
     private const uint ReprisalActionId = 7535;
     private const ushort ReprisalStatusId = 1193;
-    private const uint DivineVeilActionId = 3540;
-    private const ushort DivineVeilStatusId = 1362;
-    private const uint InterventionActionId = 7382;
-    private const ushort InterventionStatusId = 1174;
-    private const ushort KnightsResolveStatusId = 2675;
-    private const ushort KnightsBenedictionStatusId = 2676;
 
     private readonly Game.Game game;
     private readonly RecordedAbilityCatalog catalog;
@@ -36,8 +31,10 @@ internal sealed class RecordedAbilityRuntime
     private readonly Dictionary<StatusVersionKey, long> statusVersions = new();
     private readonly Dictionary<uint, uint> prereqOf = new();
     private readonly HashSet<uint> startsCombo = new();
+    private readonly HashSet<(SimCharacter Target, uint ActionId)> mechanicHits = new();
     private long generation;
     private long nextVersion;
+    private long nextResourceRevision;
 
     internal RecordedAbilityRuntime(Game.Game game)
         : this(game, RecordedAbilityCatalog.LoadEmbedded())
@@ -63,8 +60,10 @@ internal sealed class RecordedAbilityRuntime
             startsCombo.Add(action);
     }
 
-    internal bool TryUse(PartyRole role, uint actionId, byte classJob, byte level, SimCharacter? target)
+    internal bool TryUse(PartyRole role, uint actionId, byte classJob, byte level, SimCharacter? target,
+        out bool comboOk, Vector3? location = null)
     {
+        comboOk = false;
         if (!TryEnterCurrentRun()) return false;
         if (game.IsNetworkPeer || game.Paused)
             return false;
@@ -76,22 +75,22 @@ internal sealed class RecordedAbilityRuntime
         var jobRules = JobRules.StatusesFor(classJob);
         var reprisal = actionId == ReprisalActionId && TankLimitBreak.IsTank(classJob) && level >= 22;
         var tankLimitBreak = TankLimitBreak.TryGetStatus(actionId, classJob, out var lbStatus, out var lbDuration);
-        var supportAction = classJob == Paladin.JobId && actionId is DivineVeilActionId or InterventionActionId
-            ? Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRow(actionId)
-            : default;
-        var divineVeil = supportAction.RowId == DivineVeilActionId && level >= supportAction.ClassJobLevel;
-        var intervention = supportAction.RowId == InterventionActionId && level >= supportAction.ClassJobLevel;
-        if (supportAction.RowId != 0 && !divineVeil && !intervention) return false;
-        // Intervention is party-targeted, never self/enemy. Resolve and validate
-        // the submitted actor rather than reading the player's later selection.
-        if (intervention &&
-            (target is not ISimPartyMember targetMember || !IsUsableActor(target) ||
-             ReferenceEquals(caster, target) ||
-             !ReferenceEquals(game.World.Party.Get(targetMember.Role), target) ||
-             caster.Placement().DistanceSq(target) > supportAction.Range * supportAction.Range))
-            return false;
-        var explicitDefault = actionId == SprintActionId || reprisal || tankLimitBreak || divineVeil || intervention ||
-            (jobRules?.IsKnownAction(actionId) == true);
+        var supported = jobRules != null && actionId != SprintActionId && !tankLimitBreak;
+        if (supported)
+        {
+            var action = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(actionId);
+            if (action is not { } row || !JobRules.IsAvailableAction(row, classJob, level))
+                return false;
+            if (row.TargetArea)
+            {
+                if (location is not { } point || !float.IsFinite(point.X) || !float.IsFinite(point.Y) ||
+                    !float.IsFinite(point.Z) || caster.Placement().DistanceSq(point) > row.Range * row.Range)
+                    return false;
+                target = caster;
+            }
+            else if (location != null || !TryResolveJobTarget(row, caster, ref target)) return false;
+        }
+        var explicitDefault = actionId == SprintActionId || reprisal || tankLimitBreak || supported;
         if (!observed && !explicitDefault) return false;
 
         var rules = catalog.FindExecutableRules(classJob, actionId, level);
@@ -100,7 +99,7 @@ internal sealed class RecordedAbilityRuntime
 
         if (!roles.TryGetValue(role, out var state))
         {
-            state = new RoleState(caster, role, classJob, level);
+            state = new RoleState(caster, role, classJob, level) { ResourceRevision = ++nextResourceRevision };
             roles.Add(role, state);
         }
         else if (!ReferenceEquals(state.Caster, caster) || state.ClassJob != classJob || state.Level != level)
@@ -109,14 +108,21 @@ internal sealed class RecordedAbilityRuntime
             // replacement actor must retire the role before it can submit again.
             return false;
         }
+        if (classJob == Sage.JobId && actionId is 24304 or 24316 && state.Addersting == 0)
+            return false;
+        var context = Context(state, actionId, false, target);
+        var consumeSwiftcast = supported && ConsumesSwiftcast(context, classJob);
+        var consumeThinAir = classJob == WhiteMage.JobId && context.Find(1217) is not null &&
+            Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRow(actionId).PrimaryCostType == 3;
+        var roleStatus = supported ? ApplyRoleAction(context) : (ushort)0;
 
         var prerequisite = prereqOf.GetValueOrDefault(actionId);
         var hasPrerequisite = prereqOf.ContainsKey(actionId);
-        var comboOk = RecordedAbilityEligibility.IsComboReady(prerequisite, state.Combo, state.ComboAge);
+        comboOk = RecordedAbilityEligibility.IsComboReady(prerequisite, state.Combo, state.ComboAge);
         UpdateCombo(state, actionId, comboOk, hasPrerequisite);
 
         if (jobRules?.IsKnownAction(actionId) == true)
-            QueueJob(jobRules, actionId, comboOk, state);
+            QueueJob(jobRules, actionId, comboOk, state, target);
 
         if (actionId == SprintActionId)
         {
@@ -149,43 +155,20 @@ internal sealed class RecordedAbilityRuntime
                 if (state.Caster.Placement().DistanceSq(member) <= radius * radius)
                     QueueApply(state, member, lbStatus, 0, lbDuration, 0f);
         }
-        // Taiwan Action/ActionTransient: Veil grants the same 30s barrier to
-        // self and nearby party. The recording catalog only observed self.
-        if (divineVeil)
-        {
-            var radius = supportAction.EffectRange;
-            foreach (var member in game.World.Party.ActiveMembers())
-                if (IsUsableActor(member) && state.Caster.Placement().DistanceSq(member) <= radius * radius)
-                    QueueApply(state, member, DivineVeilStatusId, 0, 30f, 0f);
-        }
-        if (intervention)
-        {
-            // Enhanced Intervention (Trait 413): 8s + Resolve 4s + Benediction
-            // 12s. Before the trait, the base status lasts 6s. Status display
-            // only, like Reprisal and tank LB; no HP/mitigation model here.
-            var enhanced = level >= Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Trait>().GetRow(413).Level;
-            QueueApply(state, target!, InterventionStatusId, 0, enhanced ? 8f : 6f, 0f);
-            if (enhanced)
-            {
-                QueueApply(state, target!, KnightsResolveStatusId, 0, 4f, 0f);
-                QueueApply(state, target!, KnightsBenedictionStatusId, 0, 12f, 0f);
-            }
-        }
 
         foreach (var rule in rules)
         {
             if (rule.ActionId == SprintActionId && rule.StatusId == SprintStatusId) continue;
             if (reprisal && rule.StatusId == ReprisalStatusId || tankLimitBreak && rule.StatusId == lbStatus) continue;
-            if (divineVeil && rule.StatusId == DivineVeilStatusId ||
-                intervention && rule.StatusId is InterventionStatusId or KnightsResolveStatusId or KnightsBenedictionStatusId)
-                continue;
             if (jobRules != null && JobRules.IsOwnedTransition(jobRules, actionId, rule.StatusId)) continue;
+            if (supported && (rule.StatusId == roleStatus || rule.StatusId is 167 or 1217)) continue;
             var recipient = rule.TargetKind == RecordedAbilityTargetKind.Self ? state.Caster : target!;
             QueueApply(state, recipient, rule.StatusId, rule.Param!.Value, rule.DurationSeconds, rule.DelaySeconds);
         }
         foreach (var removal in removals)
         {
             if (jobRules != null && JobRules.IsOwnedTransition(jobRules, actionId, removal.StatusId)) continue;
+            if (supported && (removal.StatusId == roleStatus || removal.StatusId is 167 or 1217)) continue;
             var recipient = removal.TargetKind == RecordedAbilityTargetKind.Self ? state.Caster : target!;
             QueueRemove(state, recipient, removal.StatusId, removal.DelaySeconds);
         }
@@ -193,6 +176,14 @@ internal sealed class RecordedAbilityRuntime
         // one framework batch. Zero-delay outcomes must not invalidate each
         // other before the first transition has actually run.
         ApplyDueOutcomes(0f);
+        if (consumeSwiftcast) context.Remove(167);
+        if (consumeThinAir) context.Remove(1217);
+        foreach (var owner in roles.Values)
+        {
+            if (!IsUsableActor(owner.Caster)) continue;
+            JobRules.StatusesFor(owner.ClassJob)?.OnPartyAction(
+                Context(owner, actionId, comboOk, target), caster);
+        }
         return true;
     }
 
@@ -205,11 +196,19 @@ internal sealed class RecordedAbilityRuntime
             return;
         if (realSeconds == 0f) return;
 
-
+        mechanicHits.Clear();
         foreach (var state in roles.Values)
         {
             state.ComboAge = MathF.Min(30f, state.ComboAge + realSeconds);
             if (state.ComboAge >= 30f) state.Combo = 0;
+            if (IsUsableActor(state.Caster))
+                JobRules.StatusesFor(state.ClassJob)?.Tick(Context(state), realSeconds);
+            else if (state.Addersting != 0 || state.DarkArts)
+            {
+                state.Addersting = 0;
+                state.DarkArts = false;
+                PublishJobResource(state);
+            }
         }
 
         ApplyDueOutcomes(realSeconds);
@@ -238,7 +237,7 @@ internal sealed class RecordedAbilityRuntime
                         outcome.Recipient.RemoveStatus(outcome.StatusId, outcome.SourceRole);
                         break;
                     case PendingKind.Job:
-                        outcome.Rules!.Apply(outcome.ActionId, outcome.ComboOk, outcome.Caster, outcome.SourceRole);
+                        outcome.Rules!.Apply(outcome.Context);
                         break;
                 }
             }
@@ -254,6 +253,9 @@ internal sealed class RecordedAbilityRuntime
     internal void Reset()
     {
         queue.Clear();
+        foreach (var state in roles.Values)
+            JobRules.StatusesFor(state.ClassJob)?.ResetStatusState();
+        mechanicHits.Clear();
         due.Clear();
         roles.Clear();
         statusVersions.Clear();
@@ -308,33 +310,168 @@ internal sealed class RecordedAbilityRuntime
 
     private void UpdateCombo(RoleState state, uint actionId, bool comboOk, bool hasPrerequisite)
     {
-        // The caller applies the same reverse ActionCombo metadata that the
-        // client uses. Actions without combo metadata leave the current chain
-        // alone, preserving the existing RotationSim behavior.
-        if (comboOk && startsCombo.Contains(actionId))
+        // Keep the same base-action identity used by TC ActionCombo and the
+        // local native combo state, without changing the action being executed.
+        var comboAction = Machinist.ComboActionId(actionId);
+        if (comboOk && startsCombo.Contains(comboAction))
         {
-            state.Combo = actionId;
+            state.Combo = comboAction;
             state.ComboAge = 0f;
         }
-        else if (hasPrerequisite || startsCombo.Contains(actionId))
+        else if (hasPrerequisite || startsCombo.Contains(comboAction))
         {
             state.Combo = 0;
             state.ComboAge = 30f;
         }
     }
 
-    private void QueueJob(IJobStatusRules rules, uint actionId, bool comboOk, RoleState state)
+    private static bool ConsumesSwiftcast(in JobActionContext context, byte classJob)
+    {
+        if (context.Find(167) is null) return false;
+        var action = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRow(context.ActionId);
+        if (action.ActionCategory.RowId != 2 || action.Cast100ms == 0) return false;
+        if (classJob == BlackMage.JobId &&
+            (context.ActionId == 152 && context.Find(165) is not null ||
+             context.ActionId == 7422 && context.Level >= 80 ||
+             context.ActionId == 16505 && context.Level >= 100)) return false;
+        if (classJob == Paladin.JobId && context.ActionId is 7384 or 16458 &&
+            (context.Find(2673) is not null || context.Find(1368) is not null)) return false;
+        if (classJob == Reaper.JobId && context.ActionId == 24386 && context.Find(2845) is not null)
+            return false;
+        return true;
+    }
+
+    private static ushort ApplyRoleAction(in JobActionContext context)
+    {
+        // Role actions use the same authenticated job/level sheet gate as job actions.
+        var (statusNumber, seconds) = context.ActionId switch
+        {
+            7531 => (1191, 20f), // Rampart
+            7542 => (84, 20f),   // Bloodbath
+            7546 => (1250, 10f), // True North
+            7548 => (1209, 6f),  // Arm's Length
+            7549 => (1195, context.Level >= 98 ? 15f : 10f),
+            7560 => (1203, context.Level >= 98 ? 15f : 10f),
+            7561 => (167, 10f),  // Swiftcast
+            7562 => (1204, 21f), // Lucid Dreaming
+            7559 => (160, 6f),   // Surecast
+            7557 => (1199, 30f), // Peloton
+            _ => (0, 0f),
+        };
+        var status = (ushort)statusNumber;
+        if (status == 0) return 0;
+        if (context.ActionId == 7557) context.GrantParty(status, 0, seconds, 30f);
+        else context.Grant(status, 0, seconds,
+            context.ActionId is 7549 or 7560 ? context.Target : null);
+        return status;
+    }
+
+    private JobActionContext Context(RoleState state, uint actionId = 0, bool comboOk = false,
+        SimCharacter? target = null)
+        => new(this, actionId, comboOk, state.Caster, state.Role, state.Level, target, game.World);
+
+    private bool TryResolveJobTarget(Lumina.Excel.Sheets.Action action, SimCharacter caster,
+        ref SimCharacter? target)
+    {
+        // Self-centred abilities ignore the currently selected enemy. A friendly
+        // spell can fall back to self, just like the native action dispatcher.
+        if (action.CanTargetSelf &&
+            (target == null || !action.CanTargetParty && !action.CanTargetHostile ||
+                target is not ISimPartyMember && !action.CanTargetHostile))
+            target = caster;
+        if (target == null)
+            return action.TargetArea || action.CanTargetSelf;
+        if (target is ISimPartyMember member)
+        {
+            if (!ReferenceEquals(game.World.Party.Get(member.Role), target)) return false;
+            if (ReferenceEquals(caster, target) ? !action.CanTargetSelf : !action.CanTargetParty)
+                return false;
+            if (member.Dead) return false;
+        }
+        else if (!action.CanTargetHostile || target is not SimEnemy { IsActive: true, Targetable: true })
+            return false;
+        var range = action.Range < 0 ? 3f : action.Range;
+        var reach = range + caster.HitboxRadius + target.HitboxRadius;
+        return ReferenceEquals(caster, target) || caster.Placement().DistanceSq(target) <= reach * reach;
+    }
+
+    internal void ApplyJobStatus(SimCharacter caster, PartyRole role, SimCharacter recipient,
+        ushort statusId, int param, float duration)
+    {
+        if (!roles.TryGetValue(role, out var state) || !ReferenceEquals(state.Caster, caster) ||
+            !IsUsableActor(recipient)) return;
+        var key = new StatusVersionKey(recipient, statusId, role);
+        NextVersion(key);
+        recipient.AddStatusParam(statusId, param, duration, role, caster.GameObjectId);
+    }
+
+    internal void RemoveJobStatus(PartyRole role, SimCharacter recipient, ushort statusId)
+    {
+        if (!roles.ContainsKey(role)) return;
+        NextVersion(new StatusVersionKey(recipient, statusId, role));
+        recipient.RemoveStatus(statusId, role);
+    }
+
+    internal void ChangeJobResource(PartyRole role, JobResource resource, int amount)
+    {
+        if (!roles.TryGetValue(role, out var state) || !IsUsableActor(state.Caster)) return;
+        if (resource == JobResource.Addersting && state.ClassJob == Sage.JobId)
+        {
+            var value = (byte)Math.Clamp(state.Addersting + amount, 0, 3);
+            if (value == state.Addersting) return;
+            state.Addersting = value;
+        }
+        else if (resource == JobResource.DarkArts && state.ClassJob == DarkKnight.JobId)
+        {
+            var value = Math.Clamp((state.DarkArts ? 1 : 0) + amount, 0, 1) != 0;
+            if (value == state.DarkArts) return;
+            state.DarkArts = value;
+        }
+        else if (resource == JobResource.Kenki && state.ClassJob == Samurai.JobId && amount == 10)
+        {
+            if (state.KenkiGained > int.MaxValue - amount) return;
+            state.KenkiGained += amount;
+        }
+        else return;
+        PublishJobResource(state);
+    }
+
+    private void PublishJobResource(RoleState state)
+    {
+        state.ResourceRevision = ++nextResourceRevision;
+        if (state.Role == game.World.Party.PlayerRole)
+            LocalJobResources.ApplyResourceFeedback(state.ClassJob, state.ResourceRevision,
+                state.Addersting, state.DarkArts, state.KenkiGained);
+    }
+
+    internal Multiplayer.JobResourceState? JobResourceState(PartyRole role)
+        => roles.TryGetValue(role, out var state) && state.ClassJob is Sage.JobId or DarkKnight.JobId or Samurai.JobId
+            ? new Multiplayer.JobResourceState(state.ClassJob, state.ResourceRevision, state.Addersting, state.DarkArts, state.KenkiGained)
+            : null;
+
+    internal void NotifyMechanicHit(SimCharacter target, uint actionId)
+    {
+        if (!TryEnterCurrentRun() || game.IsNetworkPeer || game.Paused ||
+            !game.World.Map.IsInInstance || !IsUsableActor(target) || target is not ISimPartyMember member ||
+            !ReferenceEquals(game.World.Party.Get(member.Role), target) ||
+            !mechanicHits.Add((target, actionId))) return;
+        foreach (var state in roles.Values)
+            if (IsUsableActor(state.Caster))
+                JobRules.StatusesFor(state.ClassJob)?.OnMechanicHit(Context(state), target);
+    }
+
+    private void QueueJob(IJobStatusRules rules, uint actionId, bool comboOk, RoleState state, SimCharacter? target)
     {
         var touched = rules.TouchedStatuses(actionId, comboOk);
-        if (touched.Count == 0) return;
-        var stamps = new StatusStamp[touched.Count];
+        var stamps = touched.Count == 0 ? Array.Empty<StatusStamp>() : new StatusStamp[touched.Count];
         for (var i = 0; i < touched.Count; i++)
         {
             var key = new StatusVersionKey(state.Caster, touched[i], state.Role);
             stamps[i] = new(key, NextVersion(key));
         }
-        queue.Add(0f, generation, stamps[^1].Version,
-            PendingOutcome.Job(rules, state.Caster, state.Role, actionId, comboOk, stamps));
+        queue.Add(0f, generation, ++nextVersion,
+            PendingOutcome.Job(rules, state.Caster, state.Role, actionId, comboOk, stamps,
+                Context(state, actionId, comboOk, target)));
     }
 
     private void QueueApply(RoleState state, SimCharacter recipient, ushort statusId,
@@ -410,6 +547,10 @@ internal sealed class RecordedAbilityRuntime
         internal byte Level { get; }
         internal uint Combo { get; set; }
         internal float ComboAge { get; set; }
+        internal byte Addersting { get; set; }
+        internal bool DarkArts { get; set; }
+        internal int KenkiGained { get; set; }
+        internal long ResourceRevision { get; set; }
     }
 
     private sealed class PendingOutcome
@@ -445,6 +586,7 @@ internal sealed class RecordedAbilityRuntime
         internal long Version { get; }
         internal StatusStamp[]? Stamps { get; }
         internal IJobStatusRules? Rules { get; init; }
+        internal JobActionContext Context { get; init; }
 
         internal static PendingOutcome Apply(SimCharacter caster, SimCharacter recipient, PartyRole sourceRole,
             ushort statusId, int param, float duration, StatusVersionKey key, long version)
@@ -457,8 +599,8 @@ internal sealed class RecordedAbilityRuntime
                 0, false, key, version, null);
 
         internal static PendingOutcome Job(IJobStatusRules rules, SimCharacter caster, PartyRole sourceRole,
-            uint actionId, bool comboOk, StatusStamp[] stamps)
+            uint actionId, bool comboOk, StatusStamp[] stamps, JobActionContext context)
             => new(PendingKind.Job, caster, caster, sourceRole, 0, 0, 0f,
-                actionId, comboOk, default, 0, stamps) { Rules = rules };
+                actionId, comboOk, default, 0, stamps) { Rules = rules, Context = context };
     }
 }

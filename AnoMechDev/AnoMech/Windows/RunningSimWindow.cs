@@ -17,7 +17,10 @@ internal sealed class RunningSimWindow : Window
     {
         this.plugin = plugin;
         this.main = main;
-        Flags = ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoCollapse;
+        // 固定邏輯尺寸，收起選項或更新練習狀態時不改變外框。
+        Size = new Vector2(560, 400);
+        SizeCondition = ImGuiCond.Always;
+        Flags = ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse;
         ShowCloseButton = false;
         RespectCloseHotkey = false;
         IsOpen = false;

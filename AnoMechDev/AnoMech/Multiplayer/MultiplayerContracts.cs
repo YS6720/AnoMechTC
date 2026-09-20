@@ -73,7 +73,9 @@ public interface IMultiplayerGame
     void ApplySelfPose(PartyRole role, SelfPoseMessage pose);
     /// <summary>Host only: the member owning this role left mid-run; hand the slot to AI.</summary>
     void OrphanRole(PartyRole role);
-    bool ApplyAbilityUse(PartyRole role, AbilityUseMessage ability);
+    bool ApplyAbilityUse(PartyRole role, AbilityUseMessage ability, out bool comboOk);
+    JobResourceState? CaptureJobResources(PartyRole role);
+    void ApplyAbilityResult(AbilityResultMessage result);
     void ResetAbilityState();
     void GiveInvulnerability(PartyRole role);
     IReadOnlyList<PartyMarkerRequestMessage> CaptureLocalPartyMarkers();

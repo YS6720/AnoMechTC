@@ -156,7 +156,23 @@ internal static unsafe class Statuses
         // 可供移除，改幾次移除函式都沒用，每放一次技能就再閃一次。
         // 敵人／場景演員維持原路徑：Boss 變身要靠 AddStatus 推導 TransformationId。
         var isLocalPlayer = Plugin.ObjectTable.LocalPlayer is { } lp && (nint)chara == lp.Address;
-        if (!hasSameId && !isLocalPlayer)
+        if (isLocalPlayer)
+        {
+            for (int i = 0; i < slots.Length; i++)
+            {
+                if (slots[i].StatusId != 0) continue;
+                // TC SetStatus recalculates flags only when ID/source changes.
+                // Writing the slot first makes the setter see an unchanged status,
+                // leaving Meikyo's combo eligibility stale until another action.
+                // SetStatus also runs the native gain path: do not replay OnGainStatus.
+                bc->StatusManager.SetStatus(i, statusId, refreshDuration == 0f ? 20f : refreshDuration,
+                    param, sourceObject.GetValueOrDefault(), true);
+                Core.CrashTrace.Log($"[狀態] 本地玩家 gain {statusId} slot={i} dur={slots[i].RemainingTime:F1}");
+                return;
+            }
+            return;
+        }
+        if (!hasSameId)
         {
             bc->StatusManager.AddStatus(statusId, param);
             for (int i = 0; i < slots.Length; i++)
@@ -177,22 +193,11 @@ internal static unsafe class Statuses
         }
 
         Apply(chara, statusId, refreshDuration, param, sourceObject);
-        // 玩家本人：不走 AddStatus（登記不了、只留孤兒特效），但槽位寫好後仍要 OnGainStatus——
-        // 那是唯一實證會點亮 StatusLoopVFX 的路徑（9/15 翅膀就是它亮的）。9/16 兩條替代路
-        // 都實測不亮：SetStatus(refreshFlags: true)、直寫 CharacterData.StatusLoopVfxId。
-        // 特效現在綁在真實存在的狀態上；能否被 Remove 的 SetStatus(…, refreshFlags: true)
-        // 收掉，以維護者實機為準。
+        // Non-local fallback retains the existing direct-slot plus gain-VFX path.
         for (int i = 0; i < slots.Length; i++)
         {
             if (slots[i].StatusId != statusId) continue;
             if (sourceObject is {} source && slots[i].SourceObject != source) continue;
-            // 直寫槽位跳過了 sheet 驅動的旗標計算；連段類判定（明鏡止水讓月光／花車／雪風亮）
-            // 看的是那些旗標而不是槽位本身——資料表裡這些戰技沒有 ActionProcStatus
-            // （2026-09-16 實測 proc=0），只有騎士贖罪劍那類才靠狀態發亮。
-            // SetStatus(refreshFlags: true) 是遊戲自己「改這一格並重算旗標」的函式（不點特效，
-            // 9/16 實測）；特效仍由下面的 OnGainStatus 點。
-            if (isLocalPlayer)
-                bc->StatusManager.SetStatus(i, statusId, slots[i].RemainingTime, slots[i].Param, slots[i].SourceObject, true);
             StatusManagerPointers.OnGainStatus(
                 &bc->StatusManager,
                 statusId,
@@ -200,9 +205,7 @@ internal static unsafe class Statuses
                 param,
                 0,
                 0);
-            if (isLocalPlayer)
-                Core.CrashTrace.Log($"[狀態] 本地玩家 gain {statusId} slot={i} dur={slots[i].RemainingTime:F1}");
-            else if (trace)
+            if (trace)
                 Core.CrashTrace.Log($"[狀態] {statusId} fallback Apply+OnGain 即讀={slots[i].RemainingTime:F1}s");
             return;
         }

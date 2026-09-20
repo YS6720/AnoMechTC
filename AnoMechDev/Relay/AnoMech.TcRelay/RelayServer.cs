@@ -790,7 +790,7 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
                     room.CurrentRunId = Guid.Empty;
                     room.Phase = RunPhase.Lobby;
                 }
-                else if (packet.Message is WorldSnapshotMessage or RolesSnapshotMessage or WorldEventMessage)
+                else if (packet.Message is WorldSnapshotMessage or RolesSnapshotMessage or WorldEventMessage or AbilityResultMessage)
                 {
                     if (!connection.IsHost || room.Phase != RunPhase.Running) return false;
                 }

@@ -28,7 +28,7 @@ public class DamageSolver
         ushort[]? removeStatus = null,
         int stackMinTargets = 0, int wildChargeTargets = 0, DamageType[]? wildChargeDamageType = null,
         float? size = null, float? coneRotationDelta = null, SimCharacter[]? excludeTargets = null,
-        bool killTargets = true)
+        bool killTargets = true, bool reportsMechanicHit = true)
     {
         if (source == null) return [];
         var placement = source.Placement();
@@ -59,6 +59,8 @@ public class DamageSolver
                 deadTargets.Add(target);
             }
             
+            if (reportsMechanicHit)
+                Plugin.GameInstance?.Abilities.NotifyMechanicHit(target, actionId);
             if (target.IsAlive())
             {
                 if (removeStatus is {} r)
@@ -99,6 +101,7 @@ public class DamageSolver
                     ? "視線判定失敗（應背對卻面向目標）"
                     : "視線判定失敗（應面向卻背對目標）");
                 killed.Add(member);
+                Plugin.GameInstance?.Abilities.NotifyMechanicHit(member, 0);
             }
         }
         return killed;
@@ -162,8 +165,9 @@ public class DamageSolver
         if (target is not ISimPartyMember) return;
         var name = ActionLookup.Name(actionId);
         DamageNumbers.ShowFraction(target, fractionOfMaxHp, name);
-        if (!lethal) return;
-        target.Die($"{name}（{context}）");
+        if (lethal) target.Die($"{name}（{context}）");
+        if (fractionOfMaxHp > 0f)
+            Plugin.GameInstance?.Abilities.NotifyMechanicHit(target, actionId);
     }
 
     public void SetStatuses(DamageType type, params ushort[] statuses)

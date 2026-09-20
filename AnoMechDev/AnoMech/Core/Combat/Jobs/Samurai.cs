@@ -9,215 +9,415 @@ using FFXIVClientStructs.FFXIV.Client.Game.Object;
 
 namespace AnoMech.Core.Combat.Jobs;
 
-// 武士（7.x，等級 100）。兩層各走各的路：
-//   狀態（風月／風花／明鏡止水／天道／燕回返預備／奧義斬浪預備／殘心預備／燕飛效果提高）
-//     → IJobStatusRules：房主替每個角色跑，狀態走既有同步；成員端不跑（同騎士）。
-//   量譜（劍氣／閃／默想層數／回返種類）
-//     → IJobGaugeRules：只在自己的客戶端、只寫自己的 JobGaugeManager；不進網路。
-// 技能／狀態 id 取自台服資料表（cn_Action／cn_Status，2026-09-16）：注意 1231 是「默想」
-// 不是明鏡止水，明鏡止水是 1233；風花是 1299。
-// 尚未實機確認的一項：7.x「燕回返預備」在台服目前版本是 3852 還是 4216～4218 三分身，
-// 先用 3852；若燕回返按不出來，換 id 即可（只此一處）。
+// Samurai has two deliberately separate state paths. Status transitions are
+// host-owned and source-qualified; native gauge fields are local-only.
 internal sealed unsafe class Samurai : IJobStatusRules, IJobGaugeRules
 {
     internal const byte JobId = 34;
     internal static readonly Samurai Instance = new();
 
-    // ---- actions ----
-    private const uint Hakaze = 7477, Gyofu = 36963;
-    private const uint Jinpu = 7478, Shifu = 7479, Yukikaze = 7480, Gekko = 7481, Kasha = 7482;
-    private const uint Fuko = 25780, Mangetsu = 7484, Oka = 7485;
-    private const uint Enpi = 7486, Hagakure = 7495;
-    private const uint Higanbana = 7489, TenkaGoken = 7488, MidareSetsugekka = 7487;
-    private const uint TendoGoken = 36965, TendoSetsugekka = 36966;   // 41452~41455 是別的（台服表 lvl 0）
-    private const uint KaeshiGoken = 16485, KaeshiSetsugekka = 16486;
-    private const uint TendoKaeshiGoken = 36967, TendoKaeshiSetsugekka = 36968;
-    private const uint Shinten = 7490, Kyuten = 7491, Gyoten = 7492, Yaten = 7493, Guren = 7496, Senei = 16481;
-    private const uint Ikishoten = 16482, OgiNamikiri = 25781, KaeshiNamikiri = 25782;
-    private const uint Shoha = 16487, Meikyo = 7499, Zanshin = 36964, Tengentsu = 36962, ThirdEye = 7498;
+    // Actions
+    private const uint Hakaze = 7477;
+    private const uint Jinpu = 7478;
+    private const uint Shifu = 7479;
+    private const uint Yukikaze = 7480;
+    private const uint Gekko = 7481;
+    private const uint Kasha = 7482;
+    private const uint Fuga = 7483;
+    private const uint Mangetsu = 7484;
+    private const uint Oka = 7485;
+    private const uint Enpi = 7486;
+    private const uint Iaijutsu = 7867;
+    private const uint Higanbana = 7489;
+    private const uint TenkaGoken = 7488;
+    private const uint MidareSetsugekka = 7487;
+    private const uint Shinten = 7490;
+    private const uint Kyuten = 7491;
+    private const uint Gyoten = 7492;
+    private const uint Yaten = 7493;
+    private const uint Hagakure = 7495;
+    private const uint Guren = 7496;
+    private const uint Meditate = 7497;
+    private const uint ThirdEye = 7498;
+    private const uint Meikyo = 7499;
+    private const uint Senei = 16481;
+    private const uint Ikishoten = 16482;
+    private const uint KaeshiNamikiri = 25782;
+    private const uint KaeshiGoken = 16485;
+    private const uint KaeshiSetsugekka = 16486;
+    private const uint Shoha = 16487;
+    private const uint Fuko = 25780;
+    private const uint OgiNamikiri = 25781;
+    private const uint Gyofu = 36963;
+    private const uint Tengentsu = 36962;
+    private const uint Zanshin = 36964;
+    private const uint TendoGoken = 36965;
+    private const uint TendoSetsugekka = 36966;
+    private const uint TendoKaeshiGoken = 36967;
+    private const uint TendoKaeshiSetsugekka = 36968;
 
-    // ---- statuses ----
-    private const ushort Fugetsu = 1298;        // 風月
-    private const ushort Fuka = 1299;           // 風花
-    private const ushort MeikyoShisui = 1233;   // 明鏡止水（3 層）
-    private const ushort Tendo = 3856;          // 天道
-    private const ushort TsubameReady = 3852;   // 燕回返預備
-    private const ushort OgiReady = 2959;       // 奧義斬浪預備
-    private const ushort ZanshinReady = 3855;   // 殘心預備
-    private const ushort EnhancedEnpi = 1236;   // 燕飛效果提高
-    private const ushort TengentsuStatus = 3853;
+    // Statuses
+    private const ushort Meditation = 1231;
     private const ushort ThirdEyeStatus = 1232;
+    private const ushort MeikyoShisui = 1233;
+    private const ushort EnhancedEnpi = 1236;
+    private const ushort Fugetsu = 1298;
+    private const ushort Fuka = 1299;
+    private const ushort OgiReady = 2959;
+    private const ushort TsubameGokenReady = 3852;
+    private const ushort TengentsuStatus = 3853;
+    private const ushort TengentsuForesight = 3854;
+    private const ushort ZanshinReady = 3855;
+    private const ushort Tendo = 3856;
+    private const ushort TsubameSetsugekkaReady = 4216;
+    private const ushort TendoTsubameGokenReady = 4217;
+    private const ushort TendoTsubameSetsugekkaReady = 4218;
 
-    // 回返種類寫進 SamuraiGauge.Kaeshi 的原始位元組。安裝版 ClientStructs 的 KaeshiAction 是 7.0 前的
-    // 列舉（Higanbana=1／Goken=2／Setsugekka=3／Namikiri=4），沒有天道版；7.x 實際值以模擬區外的
-    // 探針（ProbeOutsideSim）實測為準，確認後只改這幾個常數。
-    private const byte KaeshiNone = 0, KaeshiGokenValue = 2, KaeshiSetsugekkaValue = 3, KaeshiNamikiriValue = 4;
-    private const byte KaeshiTendoGokenValue = 5, KaeshiTendoSetsugekkaValue = 6;
-
-    // ---- IJobStatusRules ----
+    // The SDK enum only defines the four established values. The Dawntrail
+    // Tendo Kaeshi byte is intentionally not written until its native value is
+    // independently verified; the four status IDs above remain authoritative.
+    private const byte KaeshiNone = 0;
+    private const byte KaeshiGokenValue = 2;
+    private const byte KaeshiSetsugekkaValue = 3;
+    private const byte KaeshiNamikiriValue = 4;
 
     public bool IsKnownAction(uint actionId) => actionId is
-        Jinpu or Shifu or Yukikaze or Gekko or Kasha or Mangetsu or Oka or
-        Enpi or Yaten or Ikishoten or OgiNamikiri or Zanshin or Meikyo or
-        TendoGoken or TendoSetsugekka or
-        KaeshiGoken or KaeshiSetsugekka or TendoKaeshiGoken or TendoKaeshiSetsugekka or
-        Tengentsu or ThirdEye;
+        Hakaze or Gyofu or Jinpu or Shifu or Yukikaze or Gekko or Kasha or Fuga or
+        Fuko or Mangetsu or Oka or Enpi or Iaijutsu or Higanbana or TenkaGoken or
+        MidareSetsugekka or Shinten or Kyuten or Gyoten or Yaten or Hagakure or
+        Guren or Meditate or ThirdEye or Meikyo or Senei or Ikishoten or
+        KaeshiNamikiri or KaeshiGoken or KaeshiSetsugekka or Shoha or OgiNamikiri or
+        Tengentsu or Zanshin or TendoGoken or TendoSetsugekka or TendoKaeshiGoken or
+        TendoKaeshiSetsugekka;
 
     public IReadOnlyList<ushort> TouchedStatuses(uint actionId, bool comboOk) => actionId switch
     {
         Jinpu or Mangetsu => [Fugetsu, MeikyoShisui],
         Shifu or Oka => [Fuka, MeikyoShisui],
-        Yukikaze or Gekko or Kasha => [MeikyoShisui],
+        Yukikaze => [MeikyoShisui],
+        Gekko => [MeikyoShisui, Fugetsu],
+        Kasha => [MeikyoShisui, Fuka],
         Yaten or Enpi => [EnhancedEnpi],
+        Meditate => [Meditation],
         Ikishoten => [OgiReady, ZanshinReady],
         OgiNamikiri => [OgiReady],
         Zanshin => [ZanshinReady],
-        Meikyo => [MeikyoShisui, Tendo, TsubameReady],
-        TendoGoken or TendoSetsugekka => [Tendo],
-        KaeshiGoken or KaeshiSetsugekka or TendoKaeshiGoken or TendoKaeshiSetsugekka => [TsubameReady],
-        Tengentsu => [TengentsuStatus],
+        Meikyo => [MeikyoShisui, Tendo],
+        TenkaGoken => [TsubameGokenReady],
+        MidareSetsugekka => [TsubameSetsugekkaReady],
+        TendoGoken => [Tendo, TendoTsubameGokenReady],
+        TendoSetsugekka => [Tendo, TendoTsubameSetsugekkaReady],
+        KaeshiGoken => [TsubameGokenReady],
+        KaeshiSetsugekka => [TsubameSetsugekkaReady],
+        TendoKaeshiGoken => [TendoTsubameGokenReady],
+        TendoKaeshiSetsugekka => [TendoTsubameSetsugekkaReady],
+        Tengentsu => [TengentsuStatus, TengentsuForesight],
         ThirdEye => [ThirdEyeStatus],
         _ => Array.Empty<ushort>(),
     };
 
-    public void Apply(uint actionId, bool comboOk, SimCharacter player, PartyRole role)
+    public void Apply(in JobActionContext context)
     {
-        var source = player.GameObjectId;
-        var meikyo = player.FindStatus(MeikyoShisui, role);
-        // 明鏡止水：連段技不需前置就算連段成立，每用一招少一層。
-        var combo = comboOk || meikyo is not null;
-        switch (actionId)
+        var meikyo = context.Find(MeikyoShisui);
+        var combo = context.ComboOk || meikyo is not null;
+
+        switch (context.ActionId)
         {
             case Jinpu or Mangetsu:
-                if (combo) Add(player, Fugetsu, 0, role, source, 40f);
-                ConsumeMeikyo(player, role, source, meikyo);
+                if (combo)
+                    context.Grant(Fugetsu, 0, 40f);
+                if (meikyo is not null)
+                    context.Consume(MeikyoShisui);
                 break;
             case Shifu or Oka:
-                if (combo) Add(player, Fuka, 0, role, source, 40f);
-                ConsumeMeikyo(player, role, source, meikyo);
+                if (combo)
+                    context.Grant(Fuka, 0, 40f);
+                if (meikyo is not null)
+                    context.Consume(MeikyoShisui);
                 break;
             case Yukikaze or Gekko or Kasha:
-                ConsumeMeikyo(player, role, source, meikyo);
+                if (meikyo is not null)
+                {
+                    if (context.ActionId == Gekko) context.Grant(Fugetsu, 0, 40f);
+                    else if (context.ActionId == Kasha) context.Grant(Fuka, 0, 40f);
+                    context.Consume(MeikyoShisui);
+                }
                 break;
             case Yaten:
-                Add(player, EnhancedEnpi, 0, role, source, 15f);
+                context.Grant(EnhancedEnpi, 0, 15f);
                 break;
             case Enpi:
-                player.RemoveStatus(EnhancedEnpi, role);
+                context.Remove(EnhancedEnpi);
+                break;
+            case Meditate:
+                context.Grant(Meditation, 0, 15f);
                 break;
             case Ikishoten:
-                Add(player, OgiReady, 0, role, source, 30f);
-                Add(player, ZanshinReady, 0, role, source, 30f);
+                if (context.Level >= 90)
+                    context.Grant(OgiReady, 0, 30f);
+                if (context.Level >= 96)
+                    context.Grant(ZanshinReady, 0, 30f);
                 break;
             case OgiNamikiri:
-                player.RemoveStatus(OgiReady, role);
+                context.Remove(OgiReady);
                 break;
             case Zanshin:
-                player.RemoveStatus(ZanshinReady, role);
+                context.Remove(ZanshinReady);
                 break;
             case Meikyo:
-                Add(player, MeikyoShisui, 3, role, source, 20f);
-                Add(player, Tendo, 0, role, source, 30f);
-                Add(player, TsubameReady, 0, role, source, 30f);
+                context.Grant(MeikyoShisui, 3, 20f);
+                if (context.Level >= 100)
+                    context.Grant(Tendo, 0, 30f);
                 break;
-            case TendoGoken or TendoSetsugekka:
-                player.RemoveStatus(Tendo, role);
+            case TenkaGoken:
+                if (context.Level >= 74)
+                    context.Grant(TsubameGokenReady, 0, 30f);
                 break;
-            case KaeshiGoken or KaeshiSetsugekka or TendoKaeshiGoken or TendoKaeshiSetsugekka:
-                player.RemoveStatus(TsubameReady, role);
+            case MidareSetsugekka:
+                if (context.Level >= 74)
+                    context.Grant(TsubameSetsugekkaReady, 0, 30f);
+                break;
+            case TendoGoken:
+                context.Remove(Tendo);
+                if (context.Level >= 100)
+                    context.Grant(TendoTsubameGokenReady, 0, 30f);
+                break;
+            case TendoSetsugekka:
+                context.Remove(Tendo);
+                if (context.Level >= 100)
+                    context.Grant(TendoTsubameSetsugekkaReady, 0, 30f);
+                break;
+            case KaeshiGoken:
+                context.Remove(TsubameGokenReady);
+                break;
+            case KaeshiSetsugekka:
+                context.Remove(TsubameSetsugekkaReady);
+                break;
+            case TendoKaeshiGoken:
+                context.Remove(TendoTsubameGokenReady);
+                break;
+            case TendoKaeshiSetsugekka:
+                context.Remove(TendoTsubameSetsugekkaReady);
                 break;
             case Tengentsu:
-                Add(player, TengentsuStatus, 0, role, source, 4f);
+                context.Grant(TengentsuStatus, 0, 4f);
                 break;
             case ThirdEye:
-                Add(player, ThirdEyeStatus, 0, role, source, 4f);
+                context.Grant(ThirdEyeStatus, 0, 4f);
                 break;
         }
     }
 
-    private static void ConsumeMeikyo(SimCharacter player, PartyRole role, GameObjectId source, SimStatus? meikyo)
+    public void OnMechanicHit(in JobActionContext context, SimCharacter target)
     {
-        if (meikyo is null) return;
-        if (meikyo.Stacks <= 1) player.RemoveStatus(MeikyoShisui, role);
-        else Add(player, MeikyoShisui, meikyo.Stacks - 1, role, source, meikyo.RemainingTime);
+        if (!ReferenceEquals(target, context.Player))
+            return;
+
+        var hitThirdEye = context.Find(ThirdEyeStatus) is not null;
+        var hitTengentsu = context.Find(TengentsuStatus) is not null;
+        if (!hitThirdEye && !hitTengentsu)
+            return;
+
+        if (hitTengentsu)
+        {
+            context.Remove(TengentsuStatus);
+            context.Grant(TengentsuForesight, 0, 9f);
+        }
+        else
+        {
+            context.Remove(ThirdEyeStatus);
+        }
+
+        if (context.Level >= 52)
+            context.AddResource(JobResource.Kenki, 10);
     }
 
-    private static void Add(SimCharacter player, ushort statusId, int param, PartyRole role,
-        GameObjectId source, float duration)
-        => player.AddStatusParam(statusId, param, duration, role, source);
+    public void ResetStatusState()
+    {
+    }
 
-    // ---- IJobGaugeRules（本機、只寫自己）----
+    // ---- Local native gauge ----
+
+    private float meditationTimer;
 
     private static SamuraiGauge* Gauge()
     {
         var manager = JobGaugeManager.Instance();
-        if (manager == null || manager->ClassJobId != JobId || manager->CurrentGauge == null) return null;
+        if (manager == null || manager->ClassJobId != JobId || manager->CurrentGauge == null)
+            return null;
         return (SamuraiGauge*)manager->CurrentGauge;
     }
 
-    private static bool LocalHas(ushort statusId)
-    {
-        if (Plugin.ObjectTable.LocalPlayer is not { } lp || lp.Address == 0) return false;
-        var slots = ((BattleChara*)lp.Address)->StatusManager.Status;
-        for (var i = 0; i < slots.Length; i++)
-            if (slots[i].StatusId == statusId) return true;
-        return false;
-    }
+    private static bool LocalHas(ushort statusId) => LocalJobResources.HasStatus(statusId);
 
-    public void OnLocalFire(uint actionId, bool comboOk)
+    public void OnLocalFire(uint actionId, bool comboOk, byte level)
     {
-        var g = Gauge();
-        if (g == null) return;
+        var gauge = Gauge();
+        if (gauge == null)
+            return;
+
         var combo = comboOk || LocalHas(MeikyoShisui);
-        int kenki = g->Kenki, meditation = g->MeditationStacks;
-        var sen = g->SenFlags;
-        var kaeshi = (byte)g->Kaeshi;
+        var kenki = (int)gauge->Kenki;
+        var meditation = (int)gauge->MeditationStacks;
+        var sen = gauge->SenFlags;
+        var kaeshi = (byte)gauge->Kaeshi;
+        var hasKenki = level >= 52;
+
         switch (actionId)
         {
-            case Hakaze or Gyofu: kenki += 5; break;
-            case Jinpu or Shifu: if (combo) kenki += 5; break;
-            case Yukikaze: if (combo) { kenki += 15; sen |= SenFlags.Setsu; } break;
-            case Gekko: if (combo) { kenki += 10; sen |= SenFlags.Getsu; } break;
-            case Kasha: if (combo) { kenki += 10; sen |= SenFlags.Ka; } break;
-            case Fuko: kenki += 10; break;
-            case Mangetsu: if (combo) { kenki += 10; sen |= SenFlags.Getsu; } break;
-            case Oka: if (combo) { kenki += 10; sen |= SenFlags.Ka; } break;
-            case Enpi: kenki += 10; break;
-            case Hagakure: kenki += 10 * SenCount(sen); sen = SenFlags.None; break;
-            case Higanbana: sen = SenFlags.None; meditation++; kaeshi = KaeshiNone; break;
-            case TenkaGoken: sen = SenFlags.None; meditation++; kaeshi = KaeshiGokenValue; break;
-            case MidareSetsugekka: sen = SenFlags.None; meditation++; kaeshi = KaeshiSetsugekkaValue; break;
-            case TendoGoken: sen = SenFlags.None; meditation++; kaeshi = KaeshiTendoGokenValue; break;
-            case TendoSetsugekka: sen = SenFlags.None; meditation++; kaeshi = KaeshiTendoSetsugekkaValue; break;
+            case Hakaze or Gyofu:
+                if (hasKenki) kenki += 5;
+                break;
+            case Jinpu or Shifu:
+                if (hasKenki && combo) kenki += 5;
+                break;
+            case Fuga:
+                if (hasKenki) kenki += 5;
+                break;
+            case Fuko:
+                if (hasKenki) kenki += 10;
+                break;
+            case Yukikaze:
+                if (hasKenki && combo)
+                {
+                    kenki += 15;
+                    sen |= SenFlags.Setsu;
+                }
+                break;
+            case Gekko:
+                if (hasKenki && combo)
+                {
+                    kenki += 10;
+                    sen |= SenFlags.Getsu;
+                }
+                break;
+            case Kasha:
+                if (hasKenki && combo)
+                {
+                    kenki += 10;
+                    sen |= SenFlags.Ka;
+                }
+                break;
+            case Mangetsu:
+                if (hasKenki && combo)
+                {
+                    kenki += 10;
+                    sen |= SenFlags.Getsu;
+                }
+                break;
+            case Oka:
+                if (hasKenki && combo)
+                {
+                    kenki += 10;
+                    sen |= SenFlags.Ka;
+                }
+                break;
+            case Enpi:
+                if (hasKenki) kenki += 10;
+                break;
+            case Hagakure:
+                if (hasKenki)
+                {
+                    kenki += 10 * SenCount(sen);
+                    sen = SenFlags.None;
+                }
+                break;
+            case Higanbana:
+                sen = SenFlags.None;
+                meditation++;
+                kaeshi = KaeshiNone;
+                break;
+            case TenkaGoken:
+                sen = SenFlags.None;
+                meditation++;
+                kaeshi = KaeshiGokenValue;
+                break;
+            case MidareSetsugekka:
+                sen = SenFlags.None;
+                meditation++;
+                kaeshi = KaeshiSetsugekkaValue;
+                break;
+            case TendoGoken or TendoSetsugekka:
+                sen = SenFlags.None;
+                meditation++;
+                // The native enum has no verified Dawntrail value. Do not
+                // leave a stale pre-Dawntrail Kaeshi selection active.
+                kaeshi = KaeshiNone;
+                break;
             case KaeshiGoken or KaeshiSetsugekka or TendoKaeshiGoken or TendoKaeshiSetsugekka:
-                meditation++; kaeshi = KaeshiNone; break;
-            case OgiNamikiri: meditation++; kaeshi = KaeshiNamikiriValue; break;
-            case KaeshiNamikiri: meditation++; kaeshi = KaeshiNone; break;
-            case Shoha: meditation = 0; break;
-            case Ikishoten: kenki += 50; break;
-            case Shinten or Kyuten or Guren or Senei: kenki -= 25; break;
-            case Gyoten or Yaten: kenki -= 10; break;
-            case Zanshin: kenki -= 50; break;
-            default: return;
+                kaeshi = KaeshiNone;
+                break;
+            case OgiNamikiri:
+                meditation++;
+                kaeshi = KaeshiNamikiriValue;
+                break;
+            case KaeshiNamikiri:
+                kaeshi = KaeshiNone;
+                break;
+            case Shoha:
+                meditation = 0;
+                break;
+            case Meditate:
+                meditationTimer = 0f;
+                break;
+            case Ikishoten:
+                if (hasKenki) kenki += 50;
+                break;
+            case Shinten or Kyuten or Guren or Senei:
+                if (hasKenki) kenki -= 25;
+                break;
+            case Gyoten or Yaten:
+                if (hasKenki) kenki -= 10;
+                break;
+            case Zanshin:
+                if (hasKenki) kenki -= 50;
+                break;
+            default:
+                return;
         }
-        g->Kenki = (byte)Math.Clamp(kenki, 0, 100);
-        g->MeditationStacks = (byte)Math.Clamp(meditation, 0, 3);
-        g->SenFlags = sen;
-        g->Kaeshi = (KaeshiAction)kaeshi;
-        Core.CrashTrace.Log($"[量譜] SAM a={actionId} combo={combo} 劍氣={g->Kenki} 閃={sen} 默想={g->MeditationStacks} 回返={kaeshi}");
+
+        gauge->Kenki = (byte)Math.Clamp(kenki, 0, 100);
+        gauge->MeditationStacks = (byte)Math.Clamp(meditation, 0, 3);
+        gauge->SenFlags = sen;
+        gauge->Kaeshi = (KaeshiAction)kaeshi;
+    }
+
+    public void Tick(float deltaSeconds, byte level)
+    {
+        var gauge = Gauge();
+        if (gauge == null || level < 60 || !LocalHas(Meditation))
+        {
+            meditationTimer = 0f;
+            return;
+        }
+        if (!float.IsFinite(deltaSeconds) || deltaSeconds <= 0f)
+            return;
+
+        meditationTimer += deltaSeconds;
+        while (meditationTimer >= 3f)
+        {
+            meditationTimer -= 3f;
+            gauge->Kenki = (byte)Math.Clamp(gauge->Kenki + 10, 0, 100);
+            // This tick runs only during active practice, which is simulated combat.
+            if (level >= 80)
+                gauge->MeditationStacks = (byte)Math.Min(gauge->MeditationStacks + 1, 3);
+        }
+    }
+
+    public void Reset(byte level)
+    {
+        meditationTimer = 0f;
+        var gauge = Gauge();
+        if (gauge == null)
+            return;
+        gauge->Kenki = 0;
+        gauge->MeditationStacks = 0;
+        gauge->SenFlags = SenFlags.None;
+        gauge->Kaeshi = (KaeshiAction)KaeshiNone;
     }
 
     private static int SenCount(SenFlags sen)
-        => ((sen & SenFlags.Setsu) != 0 ? 1 : 0) + ((sen & SenFlags.Getsu) != 0 ? 1 : 0) + ((sen & SenFlags.Ka) != 0 ? 1 : 0);
-
-    public void Reset()
-    {
-        var g = Gauge();
-        if (g == null) return;
-        g->Kenki = 0;
-        g->MeditationStacks = 0;
-        g->SenFlags = SenFlags.None;
-        g->Kaeshi = (KaeshiAction)KaeshiNone;
-    }
-
+        => ((sen & SenFlags.Setsu) != 0 ? 1 : 0)
+            + ((sen & SenFlags.Getsu) != 0 ? 1 : 0)
+            + ((sen & SenFlags.Ka) != 0 ? 1 : 0);
 }

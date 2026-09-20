@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using AnoMech.Core.Game;
 using AnoMech.Core.Native;
 using Dalamud.Hooking;
@@ -8,6 +9,8 @@ using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Group;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using AnoMech.Core.Combat.Jobs;
+using AnoMech.Core.SimObjects;
 
 namespace AnoMech.Core.Combat;
 
@@ -38,6 +41,25 @@ public sealed unsafe class RotationSim : IDisposable
     private long limitBreakProbeGeneration = -1;
     private long limitBreakProbeAt;
     private int limitBreakProbeRemaining;
+    internal static RotationSim? Instance { get; private set; }
+    private PendingAction? castingAction;
+    private PendingAction? awaitingAction;
+    private long nextActionRequest;
+    private uint cancelSerial;
+    private ushort lastExecutionSequence;
+    private bool hasExecutionSequence;
+    private int useActionDepth;
+    private readonly record struct PendingAction(uint ActionId, ushort Sequence, int ManaCost,
+        ulong TargetId, SimCharacter? Target, long Generation, byte ClassJob, byte Level,
+        long StartedAt, float CastSeconds, uint CancelSerial, bool WasCooldownIdle, long RequestId,
+        Vector3? Location = null);
+
+    internal void CancelOrdinaryCast()
+    {
+        cancelSerial++;
+        castingAction = null;
+        LocalJobResources.Flush();
+    }
 
     // ActionCombo 反查：有哪些 action 以 X 為前置（＝用了 X 之後連段燈該亮）。
     private readonly HashSet<uint> startsCombo = new();
@@ -48,6 +70,7 @@ public sealed unsafe class RotationSim : IDisposable
 
     public RotationSim()
     {
+        Instance = this;
         try
         {
             var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>();
@@ -86,6 +109,12 @@ public sealed unsafe class RotationSim : IDisposable
         byte ret;
         var statusActionId = actionId;
         var generalTankLimitBreak = false;
+        var ordinary = false;
+        var adjustedAction = actionId;
+        var manaCost = 0;
+        var cooldownWasIdle = false;
+        var sequenceBefore = am->LastUsedActionSequence;
+        var outermost = useActionDepth++ == 0;
         try
         {
             var practice = Plugin.GameInstance;
@@ -113,7 +142,7 @@ public sealed unsafe class RotationSim : IDisposable
                 var localAction = localGauge->GetActionId(localPlayer, 2);
                 if (!TankLimitBreak.TryGetStatus(localAction, classJob, out _, out _) ||
                     !practice.Abilities.TryUse(practice.World.Party.PlayerRole, localAction, classJob,
-                        (byte)Plugin.PlayerState.EffectiveLevel, null))
+                        (byte)Plugin.PlayerState.EffectiveLevel, null, out _))
                     return 0;
                 limitBreakGauge.Consume();
                 if (outOpt != null) *outOpt = false;
@@ -137,6 +166,26 @@ public sealed unsafe class RotationSim : IDisposable
                         (byte)Plugin.PlayerState.ClassJob.RowId, out _, out _);
                 }
             }
+            ordinary = outermost && actionType == ActionType.Action &&
+                practice is { HasActivePractice: true } && practice.World.Map.IsInInstance &&
+                JobRules.Supports(classJob);
+            if (ordinary)
+            {
+                if (practice!.Paused || !LocalJobResources.OwnsPlayer || awaitingAction != null) return 0;
+                UpdateOrdinaryCast(am, Environment.TickCount64);
+                if (awaitingAction != null) return 0;
+                LocalJobResources.Flush();
+                adjustedAction = am->GetAdjustedActionId(actionId);
+                var row = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(adjustedAction);
+                if (row is not { } action || !JobRules.IsAvailableAction(action, classJob,
+                        (byte)Plugin.PlayerState.EffectiveLevel)) return 0;
+                // Only MP cost kinds use GetActionCost as mana; status/gauge costs do not.
+                manaCost = action.PrimaryCostType is 3 or 4 or 76
+                    ? Math.Max(0, ActionManager.GetActionCost(ActionType.Action, adjustedAction, 0, 0, 0, 0)) : 0;
+                var detail = am->GetRecastGroupDetail(am->GetRecastGroup((int)ActionType.Action, adjustedAction));
+                cooldownWasIdle = detail == null || !detail->IsActive;
+                LocalJobResources.CapturePressStatuses();
+            }
             // Original is intentionally called exactly once. A failed native call
             // is rejected rather than retried, which could submit a duplicate cast.
             ret = hook!.Original(am, actionType, actionId, targetId, extraParam, mode, comboRouteId, outOpt);
@@ -146,6 +195,7 @@ public sealed unsafe class RotationSim : IDisposable
             CrashTrace.Log($"[循環] UseAction 原函式失敗（拒絕本次）：{ex.Message}");
             return 0;
         }
+        finally { useActionDepth--; }
         try
         {
             // 🔒 只在模擬場景執行中才介入（IsInInstance＝Start 後 true、Leave/Reset 落回 false）
@@ -169,10 +219,11 @@ public sealed unsafe class RotationSim : IDisposable
                 var text = status == 0 ? "" : Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.LogMessage>()?.GetRowOrDefault(status)?.Text.ExtractText() ?? "";
                 CrashTrace.Log($"[循環] 按鍵被拒 a={actionId} adjusted={adjusted} status={status} {text}");
             }
-            if (ret != 0 && actionType == ActionType.Action && canProcess && !areaTargeted)
-                OnActionUsed(am, actionId, targetId);
-            else if (ret != 0 && generalTankLimitBreak && canProcess && !areaTargeted)
-                OnActionUsed(am, statusActionId, 0);
+            if (ret != 0 && canProcess && !areaTargeted && outermost &&
+                (actionType == ActionType.Action || generalTankLimitBreak))
+                OnActionUsed(am, ordinary ? adjustedAction : statusActionId, targetId,
+                    sequenceBefore, manaCost, cooldownWasIdle);
+            if (ordinary) LocalJobResources.Flush();
             if (generalTankLimitBreak)
                 CrashTrace.Log($"[LB] 原生施放 a={statusActionId} ret={ret} active={canProcess}");
         }
@@ -188,9 +239,6 @@ public sealed unsafe class RotationSim : IDisposable
     // 顯示交給自畫的循環面板（RotationHudWindow）——client 的連段燈驗證鏈
     // 四輪對欄位（target／SourceSequence／GlobalSequence／Combo 直寫）皆不受控，放棄該路。
     private uint shadowCombo;
-    private uint lastFired;
-    private float lastFiredAt;
-    private ushort lastFiredSeq = ushort.MaxValue;
 
     /// <summary>A/B 實驗模式（/anomech rot N）：0=不發合成回包 1=只發序號確認（ActionId=0
     /// 空包，不帶演出） 2=完整回包（現行預設）。動畫消失／GCD 不顯示的嫌疑都指向
@@ -205,125 +253,119 @@ public sealed unsafe class RotationSim : IDisposable
     public static IReadOnlyList<uint> NextActions =>
         CurrentCombo != 0 && nextOf.TryGetValue(CurrentCombo, out var list) ? list : [];
 
-    private void OnActionUsed(ActionManager* am, uint actionId, ulong targetId)
+    internal bool PrepareGroundAction(ActionManager* am, uint actionId, out int manaCost, out bool idle)
     {
-        // 一律轉成升級後 id 再處理（2026-08-22：按王權劍時 client 連發兩次 UseAction——
-        // 基底 21＋升級 3539——先處理到 21 會把連段判走位、再多清一次；統一到升級 id
-        // 之後重複那發被下面的去重自然吃掉）。
-        actionId = am->GetAdjustedActionId(actionId);
-        var now = Environment.TickCount64 / 1000f;
+        manaCost = 0;
+        idle = false;
+        if (Plugin.GameInstance is not { HasActivePractice: true, Paused: false } game ||
+            !game.World.Map.IsInInstance || !LocalJobResources.OwnsPlayer || awaitingAction != null)
+            return false;
+        LocalJobResources.Flush();
+        var row = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRow(actionId);
+        if (!row.TargetArea || !JobRules.IsAvailableAction(row, LocalJobResources.ClassJob, LocalJobResources.Level))
+            return false;
+        manaCost = row.PrimaryCostType is 3 or 4 or 76
+            ? Math.Max(0, ActionManager.GetActionCost(ActionType.Action, actionId, 0, 0, 0, 0)) : 0;
+        var detail = am->GetRecastGroupDetail(am->GetRecastGroup((int)ActionType.Action, actionId));
+        idle = detail == null || !detail->IsActive;
+        LocalJobResources.CapturePressStatuses();
+        return true;
+    }
+
+    internal void CompleteGroundAction(ActionManager* am, uint actionId, Vector3 point,
+        ushort sequenceBefore, int manaCost, bool idle, byte result)
+    {
+        if (result != 0) OnActionUsed(am, actionId, 0, sequenceBefore, manaCost, idle, point);
+        LocalJobResources.Flush();
+    }
+
+    private void OnActionUsed(ActionManager* am, uint actionId, ulong targetId,
+        ushort sequenceBefore, int manaCost, bool cooldownWasIdle, Vector3? location = null)
+    {
         var sequence = am->LastUsedActionSequence;
-        if (sequence != lastFiredSeq && Mode > 0)
-        {
-            lastFiredSeq = sequence;
-            var confirmId = Mode == 1 ? 0u : actionId;
-            localEvents.Add(0.1f, () => FirePlayerActionEffect(confirmId, sequence));
-        }
-        // 去重窗 2.3s（< GCD 2.5）：排隊動作會走兩次 UseAction（受理＋GCD 到點執行），
-        // 兩次可相距 >1s，舊窗 1s 會重複記帳。
-        if (actionId == lastFired && now - lastFiredAt < 2.3f) return;
-        lastFired = actionId;
-        lastFiredAt = now;
+        // Native queue acceptance does not advance the execution sequence.
+        if (sequence == sequenceBefore || hasExecutionSequence && sequence == lastExecutionSequence) return;
+        hasExecutionSequence = true;
+        lastExecutionSequence = sequence;
+        var game = Plugin.GameInstance;
+        if (game == null || !LocalJobResources.OwnsPlayer) return;
+        var hasTarget = (uint)targetId is not (0 or 0xE0000000);
+        var target = hasTarget ? game.ResolveAbilityActor(targetId) : null;
+        if (hasTarget && target == null) return;
+        LocalJobResources.AcceptPressStatuses();
+        var cast = am->CastActionType == ActionType.Action && am->CastActionId == actionId &&
+            am->CastTimeTotal > 0f;
+        var pending = new PendingAction(actionId, sequence, manaCost, targetId, target,
+            game.ScenarioDispatchGeneration, LocalJobResources.ClassJob, LocalJobResources.Level,
+            Environment.TickCount64, cast ? am->CastTimeTotal - am->CastTimeElapsed : 0f,
+            cancelSerial, cooldownWasIdle, ++nextActionRequest, location);
+        if (cast) castingAction = pending;
+        else SubmitCompleted(pending);
+    }
 
-        // 排隊受理 ≠ 實際施放——戰技／魔法的記帳延到 GCD 轉完才提交。
-        // 只看 GCD 類：能力技被客戶端受理（ret=1）就是立刻施放；有充能的能力技（明鏡止水兩層）
-        // 只要一層在冷卻 recast group 就 IsActive、Total 是整段（110 秒），照舊算會把開火排到
-        // 幾十秒後、場次換代就被清掉——2026-09-16 維護者實測明鏡止水「沒生效」就是這條。
-        var fireDelay = 0.25f;
-        if (gcdActions.Contains(actionId))
-        {
-            var grp = am->GetRecastGroup((int)ActionType.Action, actionId);
-            var rd = am->GetRecastGroupDetail(grp);
-            if (rd != null && rd->IsActive && rd->Elapsed > 0.2f)
-                fireDelay = MathF.Max(0.25f, rd->Total - rd->Elapsed + 0.1f);
-        }
+    private bool IsCurrent(in PendingAction action)
+    {
+        var game = Plugin.GameInstance;
+        return game is { HasActivePractice: true } && game.World.Map.IsInInstance &&
+            LocalJobResources.OwnsPlayer && action.Generation == game.ScenarioDispatchGeneration &&
+            action.ClassJob == LocalJobResources.ClassJob && action.Level == LocalJobResources.Level &&
+            game.World.Party.Player.IsAlive() &&
+            (action.Target == null || action.Target.IsActive &&
+                ReferenceEquals(game.ResolveAbilityActor(action.TargetId), action.Target));
+    }
 
-        var fireId = actionId;
-        var capturedGame = Plugin.GameInstance;
-        var capturedGeneration = capturedGame?.ScenarioDispatchGeneration ?? -1L;
-        var capturedTargetId = targetId;
-        var hasNativeTarget = targetId != 0UL && targetId != 0xE0000000UL;
-        var capturedTarget = hasNativeTarget ? capturedGame?.ResolveAbilityActor(targetId) : null;
-        var capturedClassJob = (byte)Plugin.PlayerState.ClassJob.RowId;
-        var capturedLevel = (byte)Plugin.PlayerState.EffectiveLevel;
-        localEvents.Add(fireDelay, () =>
-        {
-            if (capturedGame is null ||
-                !ReferenceEquals(Plugin.GameInstance, capturedGame) ||
-                capturedGame.ScenarioDispatchGeneration != capturedGeneration)
-                return;
-            if (hasNativeTarget &&
-                (capturedTarget is not { IsActive: true } ||
-                 !ReferenceEquals(capturedGame.ResolveAbilityActor(capturedTargetId), capturedTarget)))
-                return;
+    private void UpdateOrdinaryCast(ActionManager* am, long now)
+    {
+        if (castingAction is not { } action) return;
+        if (!IsCurrent(action) || action.CancelSerial != cancelSerial)
+        { castingAction = null; return; }
+        var elapsed = (now - action.StartedAt) / 1000f;
+        var nativeCasting = am->CastActionType == ActionType.Action && am->CastActionId == action.ActionId &&
+            am->CastTimeTotal > 0f && am->CastTimeElapsed < am->CastTimeTotal;
+        // A disappeared cast before its deadline is cancellation, not completion.
+        if (!nativeCasting && elapsed + 0.02f < action.CastSeconds)
+        { castingAction = null; LocalJobResources.Flush(); return; }
+        if (nativeCasting || elapsed < action.CastSeconds) return;
+        castingAction = null;
+        SubmitCompleted(action);
+    }
 
-            var pre = prereqOf.GetValueOrDefault(fireId);
-            var comboOk = pre == 0 || (shadowCombo == pre && comboAge < 30f);
-            if (comboOk && startsCombo.Contains(fireId))
-            {
-                shadowCombo = fireId;
-                comboAge = 0f;
-            }
-            else if (prereqOf.ContainsKey(fireId) || startsCombo.Contains(fireId))
-            {
-                shadowCombo = 0;
-                comboAge = 30f;
-            }
+    private void SubmitCompleted(in PendingAction action)
+    {
+        if (!IsCurrent(action) || Plugin.GameInstance.Paused) return;
+        awaitingAction = action;
+        if (!Plugin.GameInstance.SubmitAbility(action.ActionId, action.ClassJob, action.Level,
+                action.TargetId, action.RequestId, action.Location))
+            CompleteOrdinaryAction(action.RequestId, accepted: false, comboOk: false);
+    }
+
+    internal void CompleteOrdinaryAction(long requestId, bool accepted, bool comboOk)
+    {
+        if (awaitingAction is not { } action || action.RequestId != requestId) return;
+        awaitingAction = null;
+        if (!IsCurrent(action)) return;
+        if (accepted)
+        {
+            var comboAction = Machinist.ComboActionId(action.ActionId);
+            if (comboOk && startsCombo.Contains(comboAction))
+            { shadowCombo = comboAction; comboAge = 0f; }
+            else if (prereqOf.ContainsKey(action.ActionId) || startsCombo.Contains(comboAction))
+            { shadowCombo = 0; comboAge = 30f; }
             CurrentCombo = shadowCombo;
-            CrashTrace.Log($"[循環] a={fireId} comboOk={comboOk} shadow={shadowCombo} delay={fireDelay:F1}");
-            // 職業量譜只寫自己的客戶端記憶體（房主或成員都一樣），不進網路。
-            Jobs.JobRules.OnLocalFire(capturedClassJob, fireId, comboOk);
-            // Local bookkeeping is complete before the host-authoritative submit.
-            capturedGame.SubmitAbility(fireId, capturedClassJob, capturedLevel, capturedTargetId);
-        });
-
-        // 招式自身冷卻（瀝血劍 60s 這類）真環境由伺服器確認後啟動——模擬區沒確認，
-        // 0.2s 後查該招 recast 沒轉就補踢。
-        // 充能技（明鏡止水 2 層）：客戶端自己的預測會把整組從零起算（elapsed=0 → 0 層），
-        // 真實只用掉一層。記住按下當時這組是不是「滿的」，0.2s 後把 Elapsed 推到「剩最後一層在轉」。
-        var chargeGroup = am->GetRecastGroup((int)ActionType.Action, fireId);
-        var chargeDetail = am->GetRecastGroupDetail(chargeGroup);
-        var wasIdleBeforePress = chargeDetail == null || !chargeDetail->IsActive;
-        localEvents.Add(0.2f, () =>
-        {
-            var am2 = ActionManager.Instance();
-            if (am2 == null) return;
-            var group = am2->GetRecastGroup((int)ActionType.Action, fireId);
-            var detail = am2->GetRecastGroupDetail(group);
-            if (detail == null) return;
-            var charges = ActionManager.GetMaxCharges(fireId, 0);
-            if (!detail->IsActive)
+            LocalJobResources.CommitAction(action.ActionId, comboOk, action.ManaCost);
+            var am = ActionManager.Instance();
+            if (am != null)
             {
-                am2->StartCooldown(ActionType.Action, fireId);
-                CrashTrace.Log($"[循環] 補踢冷卻 a={fireId} grp={group}");
+                var detail = am->GetRecastGroupDetail(am->GetRecastGroup((int)ActionType.Action, action.ActionId));
+                if (detail != null && !detail->IsActive) am->StartCooldown(ActionType.Action, action.ActionId);
+                var charges = ActionManager.GetMaxCharges(action.ActionId, 0);
+                if (detail != null && detail->IsActive && charges > 1 && action.WasCooldownIdle)
+                    detail->Elapsed = MathF.Max(detail->Elapsed, detail->Total - detail->Total / charges);
             }
-            if (charges > 1 && wasIdleBeforePress && detail->IsActive && detail->Total > 0f)
-            {
-                var oneChargeLeft = detail->Total - detail->Total / charges;
-                if (detail->Elapsed < oneChargeLeft)
-                {
-                    detail->Elapsed = oneChargeLeft;
-                    CrashTrace.Log($"[循環] 充能修正 a={fireId} charges={charges} elapsed→{detail->Elapsed:F1}/{detail->Total:F1}");
-                }
-            }
-        });
-        localEvents.Add(0.6f, () =>
-        {
-            var am3 = ActionManager.Instance();
-            if (am3 != null)
-                CrashTrace.Log($"[循環] adjust(16460)={am3->GetAdjustedActionId(16460)} adjust(16459)={am3->GetAdjustedActionId(16459)}");
-        });
-        localEvents.Add(0.5f, () =>
-        {
-            var p = Player();
-            if (p != null)
-                CrashTrace.Log($"[循環] 讀回 2673={Statuses.GetRemaining(p, 2673):F0}s"
-                             + $" 1902={Statuses.GetRemaining(p, 1902):F0}s"
-                             + $" 3827={Statuses.GetRemaining(p, 3827):F0}s"
-                             + $" 3828={Statuses.GetRemaining(p, 3828):F0}s"
-                             + $" 3019={Statuses.GetRemaining(p, 3019):F0}s"
-                             + $" 1368x{Statuses.GetParam(p, 1368)}");
-        });
+        }
+        LocalJobResources.Flush();
+        // A cast's synthetic native acknowledgment must never precede completion.
+        if (Mode > 0) FirePlayerActionEffect(Mode == 1 ? 0u : action.ActionId, action.Sequence);
     }
 
     private static Character* Player()
@@ -409,6 +451,7 @@ public sealed unsafe class RotationSim : IDisposable
     {
         if (!recastSnapshotTaken) return;
         recastSnapshotTaken = false;
+        if (!LocalJobResources.OwnsPlayer) return;
         var passed = (Environment.TickCount64 - recastSnapshotAt) / 1000f;
         var restored = 0;
         for (var i = 0; i < RecastGroupCount; i++)
@@ -499,22 +542,36 @@ public sealed unsafe class RotationSim : IDisposable
             {
                 localEvents.Clear();
                 ResetLocalState();
-                // 量譜只在模擬區內、新場次開始那一刻歸零。模擬區外這個分支每幀都會走，
-                // 在那裡歸零等於把真伺服器的量譜每幀清掉。
-                if (inSim && game.HasActivePractice && generation != schedulerGeneration)
-                    Jobs.JobRules.ResetLocalGauge();
+                castingAction = awaitingAction = null;
+                if (LocalJobResources.Active) LocalJobResources.End();
+                if (inSim && game.HasActivePractice)
+                    LocalJobResources.Begin((byte)Plugin.PlayerState.ClassJob.RowId,
+                        (byte)Plugin.PlayerState.EffectiveLevel);
                 schedulerGeneration = generation;
                 if (!inSim || !game.HasActivePractice) return;
             }
-            if (game.Paused) return;
+            if (!LocalJobResources.Active)
+                LocalJobResources.Begin((byte)Plugin.PlayerState.ClassJob.RowId,
+                    (byte)Plugin.PlayerState.EffectiveLevel);
+            if (!LocalJobResources.OwnsPlayer) return;
+            LocalJobResources.Flush();
+            if (game.Paused)
+            {
+                if (castingAction is { } pausedCast)
+                    castingAction = pausedCast with { StartedAt = pausedCast.StartedAt + (long)(delta * 1000f) };
+                return;
+            }
 
-            Jobs.JobRules.TickLocalGauge((byte)Plugin.PlayerState.ClassJob.RowId, delta);
+            Jobs.JobRules.TickLocalGauge(LocalJobResources.ClassJob, delta, LocalJobResources.Level);
+            LocalJobResources.CaptureGauge();
+            LocalJobResources.Tick(delta, JobRules.AllowsNaturalManaRecovery(LocalJobResources.ClassJob));
             comboAge = MathF.Min(30f, comboAge + delta);
             if (comboAge >= 30f) shadowCombo = CurrentCombo = 0;
             localEvents.Tick(delta);
 
             var am = ActionManager.Instance();
             if (am == null) return;
+            UpdateOrdinaryCast(am, now);
             // 序號對齊**不放每幀**：技能佇列靠 used≠handled 判斷「上一發還沒確認」，
             // 每幀抹平會把排隊中的下一發丟掉。對齊只在合成回包後做一次。
             var want = CurrentComboAge < 30f ? CurrentCombo : 0u;
@@ -523,10 +580,7 @@ public sealed unsafe class RotationSim : IDisposable
                 am->Combo.Action = want;
                 am->Combo.Timer = want == 0 ? 0f : 30f - CurrentComboAge;
             }
-            // MP 維持滿格（模擬區沒有伺服器的 MP 校正與自然回復）。
-            var p = Player();
-            if (p != null && p->Mana < p->MaxMana)
-                p->Mana = p->MaxMana;
+            LocalJobResources.Flush();
         }
         catch { /* 每幀路徑，靜默防護 */ }
     }
@@ -535,13 +589,14 @@ public sealed unsafe class RotationSim : IDisposable
         shadowCombo = 0;
         CurrentCombo = 0;
         comboAge = 0f;
-        lastFired = 0;
-        lastFiredAt = 0f;
-        lastFiredSeq = ushort.MaxValue;
+        hasExecutionSequence = false;
     }
     public void Dispose()
     {
         Plugin.Framework.Update -= ReassertCombo;
+        castingAction = awaitingAction = null;
+        LocalJobResources.End();
+        if (ReferenceEquals(Instance, this)) Instance = null;
         localEvents.Clear();
         limitBreakGauge.Restore();
         hook?.Disable();

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-
 using AnoMech.Core.Game.Party;
 using AnoMech.Core.SimObjects;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -9,202 +8,268 @@ using FFXIVClientStructs.FFXIV.Client.Game.Object;
 
 namespace AnoMech.Core.Combat.Jobs;
 
-// Paladin's proc chain is an explicit legacy convention, not a generic
-// recorded-ability rule. SimStatus owns the positive 30s lifetime and the
-// source-qualified replacement/removal, keeping the old gain-before-remove
-// ordering without letting a peer or an independent input hook mutate the
-// player.
-//
-// 原本原生槽寫的是 -30（負值＝永久／不顯示倒數的慣例）。維護者 2026-09-15 實機回報
-// 「能力技按完之後都沒秒數」，診斷版證實原生槽的值確實是固定不動的：騎士 proc 在
-// 遊戲本體是有 30 秒倒數的，寫負值等於把它藏掉。改成不覆寫——SimStatus.Tick 每幀把
-// 遞減中的 RemainingTime 寫進原生槽，倒數就跟著跑。狀態的存活仍由 SimStatus 決定，
-// 不是交給引擎：它在 RemainingTime 歸零時 Despawn，與寫入值一致。
+// Paladin's status transitions are deliberately host-owned. Native Confiteor
+// combo fields are present in the installed schema, but their step/timer
+// semantics are not proven; the source-qualified SimStatus chain is the
+// authoritative practice state instead.
 internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
 {
     internal const byte JobId = 19;
     internal static readonly Paladin Instance = new();
 
-    // 武裝戌守（Passage of Arms）是引導技：站著不動就持續，移動或用任何技能立刻結束。
-    // 實錄規則只有「7385 → 掛 1175 17.95 秒」，沒有取消條件；9/15 記為暫不處理，維護者
-    // 2026-09-16 明確要求：「人物動了放技能他正常要馬上停止」——否則每個 GCD 新掛的連段狀態
-    // 走 OnGainStatus 時，引擎會把還在槽裡的 1175 翅膀重播一次。
+    // Passage of Arms is a channel. Existing input hooks call this symbol when
+    // movement or another action cancels the channel.
     internal const ushort PassageOfArms = 1175;
 
-    /// <summary>移動輸入或按下任何技能的那一幀呼叫；有引導中的狀態就結束它。</summary>
     internal static void CancelChanneled(SimCharacter player)
-    {
-        // 實錄規則建立的 1175 帶著騎士角色來源；HasStatus／RemoveStatus 的無來源版本是
-        // 「來源＝null」精確比對，永遠找不到（9/16 trace：放技能後沒有任何 remove）。
-        player.RemoveStatusAnySource(PassageOfArms);
-    }
+        => player.RemoveStatusAnySource(PassageOfArms);
 
+    // ---- actions ----
+    private const uint Sentinel = 17;
     private const uint FightOrFlight = 20;
-    private const uint RoyalAuthority = 3539;
+    private const uint Bulwark = 22;
+    private const uint Cover = 27;
+    private const uint HallowedGround = 30;
     private const uint GoringBlade = 3538;
-    private const uint Atonement = 16460;
-    private const uint Supplication = 36918;
-    private const uint Sepulchre = 36919;
-    private const uint HolySpirit = 7384;
-    private const uint HolyCircle = 16458;
+    private const uint RoyalAuthority = 3539;
+    private const uint DivineVeil = 3540;
+    private const uint Sheltron = 3542;
+    private const uint Intervention = 7382;
     private const uint Requiescat = 7383;
-    private const uint Imperator = 36921;
+    private const uint HolySpirit = 7384;
+    private const uint Passage = 7385;
+    private const uint Prominence = 16457;
+    private const uint HolyCircle = 16458;
     private const uint Confiteor = 16459;
+    private const uint Atonement = 16460;
+    private const uint HolySheltron = 25746;
     private const uint BladeOfFaith = 25748;
     private const uint BladeOfTruth = 25749;
     private const uint BladeOfValor = 25750;
+    private const uint Supplication = 36918;
+    private const uint Sepulchre = 36919;
+    private const uint Guardian = 36920;
+    private const uint Imperator = 36921;
+    private const uint GloryBlade = 36922;
 
-    private const ushort DivineMight = 2673;        // 神聖魔法效果提高
-    private const ushort AtonementReady = 1902;     // 贖罪劍預備
-    private const ushort SupplicationReady = 3827;  // 祈告劍預備
-    private const ushort SepulchreReady = 3828;     // 葬送劍預備
-    private const ushort RequiescatStatus = 1368;   // 安魂祈禱
-    private const ushort ConfiteorReady = 3019;     // 悔罪預備
-    private const ushort GoringBladeReady = 3847;   // 瀝血劍預備（戰逃反應給）
+    // ---- statuses ----
+    private const ushort SentinelStatus = 74;
+    private const ushort FightOrFlightStatus = 76;
+    private const ushort BulwarkStatus = 77;
+    private const ushort HallowedGroundStatus = 82;
+    private const ushort DivineVeilStatus = 1362;
+    private const ushort DivineMight = 2673;
+    private const ushort HolySheltronStatus = 2674;
+    private const ushort KnightsResolve = 2675;
+    private const ushort KnightsBenediction = 2676;
+    private const ushort RequiescatStatus = 1368;
+    private const ushort InterventionStatus = 1174;
+    private const ushort ConfiteorReady = 3019;
+    private const ushort GoringBladeReady = 3847;
+    private const ushort AtonementReady = 1902;
+    private const ushort SupplicationReady = 3827;
+    private const ushort SepulchreReady = 3828;
+    private const ushort GuardianStatus = 3829;
+    private const ushort GuardianShield = 3830;
+    private const ushort GloryBladeReady = 3831;
 
-    public bool IsKnownAction(uint actionId)
-        => actionId is FightOrFlight or RoyalAuthority or GoringBlade or Atonement or
-            Supplication or Sepulchre or HolySpirit or HolyCircle or Requiescat or
-            Imperator or Confiteor or BladeOfFaith or BladeOfTruth or BladeOfValor;
-
-
-    internal static bool AppliesStatus(uint actionId, bool comboOk)
-        => actionId switch
-        {
-            FightOrFlight or GoringBlade or Atonement or Supplication or Sepulchre or
-                HolySpirit or HolyCircle or Requiescat or Imperator or Confiteor or
-                BladeOfFaith or BladeOfTruth or BladeOfValor => true,
-            RoyalAuthority => comboOk,
-            _ => false,
-        };
+    public bool IsKnownAction(uint actionId) => actionId is
+        Sentinel or FightOrFlight or Bulwark or HallowedGround or GoringBlade or
+        RoyalAuthority or DivineVeil or Sheltron or Intervention or Requiescat or
+        HolySpirit or Passage or Prominence or HolyCircle or Confiteor or Atonement or
+        HolySheltron or BladeOfFaith or BladeOfTruth or BladeOfValor or Supplication or
+        Sepulchre or Guardian or Imperator or GloryBlade;
 
     public IReadOnlyList<ushort> TouchedStatuses(uint actionId, bool comboOk)
         => actionId switch
         {
-            FightOrFlight or GoringBlade => [GoringBladeReady],
+            Sentinel => [SentinelStatus],
+            FightOrFlight => [FightOrFlightStatus, GoringBladeReady],
+            Bulwark => [BulwarkStatus],
+            HallowedGround => [HallowedGroundStatus],
+            GoringBlade => [GoringBladeReady],
             RoyalAuthority when comboOk => [DivineMight, AtonementReady],
-            Atonement => [SupplicationReady, AtonementReady],
-            Supplication => [SepulchreReady, SupplicationReady],
+            DivineVeil => [DivineVeilStatus],
+            Intervention => [InterventionStatus, KnightsResolve, KnightsBenediction],
+            HolySpirit or HolyCircle => [DivineMight, RequiescatStatus],
+            Prominence when comboOk => [DivineMight],
+            Atonement => [AtonementReady, SupplicationReady],
+            Supplication => [SupplicationReady, SepulchreReady],
             Sepulchre => [SepulchreReady],
-            HolySpirit or HolyCircle => [DivineMight],
-            Requiescat or Imperator => [RequiescatStatus, ConfiteorReady],
-            Confiteor or BladeOfFaith or BladeOfTruth or BladeOfValor => [RequiescatStatus, ConfiteorReady],
+            HolySheltron => [HolySheltronStatus, KnightsResolve, KnightsBenediction],
+            Confiteor or BladeOfFaith or BladeOfTruth or BladeOfValor
+                => [RequiescatStatus, ConfiteorReady, GloryBladeReady],
+            Guardian => [GuardianStatus, GuardianShield],
+            Passage => [PassageOfArms],
+            GloryBlade => [GloryBladeReady],
             _ => Array.Empty<ushort>(),
         };
 
-    public void Apply(uint actionId, bool comboOk, SimCharacter player, PartyRole sourceRole)
+    public void Apply(in JobActionContext context)
     {
-        if (!AppliesStatus(actionId, comboOk)) return;
-        var sourceObject = player.GameObjectId;
-        switch (actionId)
+        switch (context.ActionId)
         {
+            case Sentinel:
+                context.Grant(SentinelStatus, 0, 15f);
+                break;
             case FightOrFlight:
-                Add(player, GoringBladeReady, 0, sourceRole, sourceObject);
+                context.Grant(FightOrFlightStatus, 0, 20f);
+                context.Grant(GoringBladeReady, 0, 30f);
+                break;
+            case Bulwark:
+                context.Grant(BulwarkStatus, 0, 10f);
+                break;
+            case HallowedGround:
+                context.Grant(HallowedGroundStatus, 0, 10f);
                 break;
             case GoringBlade:
-                Remove(player, GoringBladeReady, sourceRole);
+                context.Remove(GoringBladeReady);
                 break;
-            case RoyalAuthority when comboOk:
-                Add(player, DivineMight, 0, sourceRole, sourceObject);
-                Add(player, AtonementReady, 0, sourceRole, sourceObject);
+            case RoyalAuthority when context.ComboOk:
+            case Prominence when context.ComboOk:
+                context.Grant(DivineMight, 0, 30f);
+                if (context.ActionId == RoyalAuthority)
+                    context.Grant(AtonementReady, 0, 30f);
                 break;
-            // Native RemoveStatus clears lazily. Keep the proven order: insert the
-            // replacement first, then remove the old proc.
+            case DivineVeil:
+                // EffectRange in the installed Action row is 30m; GrantParty
+                // also includes the caster when active.
+                context.GrantParty(DivineVeilStatus, 0, 30f, 30f);
+                break;
+            case Intervention:
+                if (context.Target is null) break;
+                var interventionDuration = context.Level >= 82 ? 8f : 6f;
+                context.Grant(InterventionStatus, 0, interventionDuration, context.Target);
+                if (context.Level >= 82)
+                {
+                    context.Grant(KnightsResolve, 0, 4f, context.Target);
+                    context.Grant(KnightsBenediction, 0, 12f, context.Target);
+                }
+                break;
+            case Requiescat:
+            case Imperator:
+                context.Grant(RequiescatStatus, 4, 30f);
+                context.Grant(ConfiteorReady, 0, 30f);
+                break;
+            case HolySpirit:
+            case HolyCircle:
+                context.Consume(RequiescatStatus);
+                context.Consume(DivineMight);
+                break;
             case Atonement:
-                if (Add(player, SupplicationReady, 0, sourceRole, sourceObject))
-                    Remove(player, AtonementReady, sourceRole);
+                if (context.Find(AtonementReady) is not null)
+                {
+                    context.Grant(SupplicationReady, 0, 30f);
+                    context.Consume(AtonementReady);
+                }
                 break;
             case Supplication:
-                if (Add(player, SepulchreReady, 0, sourceRole, sourceObject))
-                    Remove(player, SupplicationReady, sourceRole);
+                if (context.Find(SupplicationReady) is not null)
+                {
+                    context.Grant(SepulchreReady, 0, 30f);
+                    context.Consume(SupplicationReady);
+                }
                 break;
             case Sepulchre:
-                Remove(player, SepulchreReady, sourceRole);
+                context.Consume(SepulchreReady);
                 break;
-            case HolySpirit or HolyCircle:
-                Remove(player, DivineMight, sourceRole);
+            case HolySheltron:
+                context.Grant(HolySheltronStatus, 0, 8f);
+                context.Grant(KnightsResolve, 0, 4f);
+                context.Grant(KnightsBenediction, 0, 12f);
                 break;
-            case Requiescat or Imperator:
-                Add(player, RequiescatStatus, 4, sourceRole, sourceObject);
-                Add(player, ConfiteorReady, 0, sourceRole, sourceObject);
+            case Confiteor:
+            case BladeOfFaith:
+            case BladeOfTruth:
+            case BladeOfValor:
+                ConsumeConfiteorStep(in context);
                 break;
-            case Confiteor or BladeOfFaith or BladeOfTruth or BladeOfValor:
-                var status = player.FindStatus(RequiescatStatus, sourceRole);
-                var stacks = status?.Stacks ?? 0;
-                if (stacks <= 1)
-                {
-                    Remove(player, RequiescatStatus, sourceRole);
-                    Remove(player, ConfiteorReady, sourceRole);
-                }
-                else
-                {
-                    // 剩餘時間沿用原本那份，不重置倒數；原生槽跟著 SimStatus 的遞減值走。
-                    Add(player, RequiescatStatus, stacks - 1, sourceRole, sourceObject,
-                        status!.RemainingTime);
-                }
+            case Guardian:
+                context.Grant(GuardianStatus, 0, 15f);
+                context.Grant(GuardianShield, 0, 15f);
+                break;
+            case Passage:
+                context.Grant(PassageOfArms, 0, 18f);
+                break;
+            case GloryBlade:
+                context.Consume(GloryBladeReady);
                 break;
         }
     }
 
-    private static bool Add(SimCharacter player, ushort statusId, int param, PartyRole sourceRole,
-        GameObjectId sourceObject, float duration = 30f)
-        => player.AddStatusParam(statusId, param, duration, sourceRole, sourceObject) is not null;
+    private static void ConsumeConfiteorStep(in JobActionContext context)
+    {
+        // ConfiteorReady belongs only to the first action in this chain. The
+        // Requiescat stack is an independent four-cast resource: Holy Spirit
+        // and Holy Circle consume it first, while any remaining stack is
+        // consumed by the Confiteor follow-up sequence.
+        if (context.ActionId == Confiteor)
+            context.Remove(ConfiteorReady);
 
-    private static void Remove(SimCharacter player, ushort statusId, PartyRole sourceRole)
-        => player.RemoveStatus(statusId, sourceRole);
+        var requiescat = context.Find(RequiescatStatus);
+        if (requiescat is not null)
+        {
+            if (requiescat.Stacks <= 1)
+                context.Remove(RequiescatStatus);
+            else
+                context.Grant(RequiescatStatus, requiescat.Stacks - 1,
+                    requiescat.RemainingTime);
+        }
 
-    // ---- IJobGaugeRules：忠義量譜（本機、只寫自己）----
-    //
-    // 模擬區的防火牆擋掉伺服器封包，所以量譜在練習時完全不會動——維護者 2026-09-18 要求補上。
-    // 回復只有一條路：**每次自動攻擊揮擊 +5**（維護者更正：沒有隨時間自動回復）。揮擊節奏
-    // 取自實際裝備主手的 Lumina `Delayms`，不是猜一個固定值，且只有自動攻擊確實開著時才累加。
-    // 練習開場直接給滿 100：練的是機制，不是從零疊忠義（維護者 2026-09-18）。
-    private const uint Sheltron = 3542;
-    private const uint HolySheltron = 25746;
-    private const uint Intervention = 7382;
-    private const uint Cover = 27;
+        // Blade of Valor is the level-100 transition into Glory Blade. Grant
+        // the next proc before consuming the last Requiescat stack so an
+        // outcome invalidation can never erase both sides of the hand-off.
+        if (context.ActionId == BladeOfValor && context.Level >= 100)
+            context.Grant(GloryBladeReady, 0, 30f);
+    }
+
+    // ---- IJobGaugeRules: Oath gauge (local native gauge only) ----
     private const int OathMax = 100;
     private const int OathPerAutoAttack = 5;
-    private const int SpendCost = 50;
+    private const int OathSpend = 50;
     private const float FallbackWeaponDelaySeconds = 2.24f;
-
     private float autoAttackTimer;
 
     private static PaladinGauge* Gauge()
     {
         var manager = JobGaugeManager.Instance();
-        if (manager == null || manager->ClassJobId != JobId || manager->CurrentGauge == null) return null;
+        if (manager == null || manager->ClassJobId != JobId || manager->CurrentGauge == null)
+            return null;
         return (PaladinGauge*)manager->CurrentGauge;
     }
 
-    /// <summary>主手武器的攻擊間隔；讀不到就用騎士常見的 2.24 秒。</summary>
     private static float WeaponDelaySeconds()
     {
         var inventory = InventoryManager.Instance();
-        var equipped = inventory == null ? null : inventory->GetInventoryContainer(InventoryType.EquippedItems);
+        var equipped = inventory == null
+            ? null
+            : inventory->GetInventoryContainer(InventoryType.EquippedItems);
         if (equipped == null || equipped->Size == 0) return FallbackWeaponDelaySeconds;
         var slot = equipped->GetInventorySlot(0);
         if (slot == null || slot->ItemId == 0) return FallbackWeaponDelaySeconds;
         var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
-        if (!sheet.TryGetRow(slot->ItemId, out var item) || item.Delayms == 0) return FallbackWeaponDelaySeconds;
+        if (!sheet.TryGetRow(slot->ItemId, out var item) || item.Delayms == 0)
+            return FallbackWeaponDelaySeconds;
         return item.Delayms / 1000f;
     }
 
     private static void AddOath(PaladinGauge* gauge, int amount)
         => gauge->OathGauge = (byte)Math.Clamp(gauge->OathGauge + amount, 0, OathMax);
 
-    public void Tick(float deltaSeconds)
+    public void Tick(float deltaSeconds, byte level)
     {
+        _ = level;
         var gauge = Gauge();
         if (gauge == null) return;
-        // 自動攻擊沒開就不累加，也不讓計時器偷跑：下次開打從一個完整間隔開始。
         if (Plugin.PlayerInputHooks?.IsAutoAttacking != true)
         {
             autoAttackTimer = 0f;
             return;
         }
+
         var delay = WeaponDelaySeconds();
-        autoAttackTimer += deltaSeconds;
+        if (delay <= 0f) delay = FallbackWeaponDelaySeconds;
+        autoAttackTimer += MathF.Max(0f, deltaSeconds);
         while (autoAttackTimer >= delay)
         {
             autoAttackTimer -= delay;
@@ -212,23 +277,27 @@ internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
         }
     }
 
-    public void OnLocalFire(uint actionId, bool comboOk)
+    public void OnLocalFire(uint actionId, bool comboOk, byte level)
     {
+        _ = comboOk;
+        _ = level;
         var gauge = Gauge();
         if (gauge == null) return;
-        switch (actionId)
-        {
-            case Sheltron or HolySheltron or Intervention or Cover:
-                AddOath(gauge, -SpendCost);
-                break;
-            default:
-                return;
-        }
+        if (comboOk && actionId is 15 or Prominence)
+            LocalJobResources.RestoreMana(1_000);
+        if (actionId is Atonement or Supplication or Sepulchre)
+            LocalJobResources.RestoreMana(400);
+        if (actionId is 23 or 25747)
+            LocalJobResources.RestoreMana(500);
+        if (actionId is not Sheltron and not HolySheltron and not Intervention and not Cover)
+            return;
+        AddOath(gauge, -OathSpend);
         Core.CrashTrace.Log($"[量譜] PLD a={actionId} 忠義={gauge->OathGauge}");
     }
 
-    public void Reset()
+    public void Reset(byte level)
     {
+        _ = level;
         autoAttackTimer = 0f;
         var gauge = Gauge();
         if (gauge != null) gauge->OathGauge = OathMax;
