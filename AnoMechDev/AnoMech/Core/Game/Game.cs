@@ -469,18 +469,22 @@ public sealed partial class Game : IDisposable
     // (LocalPlayerInputHooks lets Original run so the recast starts). Clear it
     // here so each scenario starts with Sprint ready, regardless of whether
     // the player pressed it just before clicking Start.
-    private static unsafe void ResetSprintCooldown()
+    internal static unsafe void ResetSprintCooldown()
     {
         var am = ActionManager.Instance();
         if (am == null) return;
         // Start＝全技能 CD 歸零（維護者 2026-08-22：「每次start請重置技能CD」）——
         // 練循環每輪都要從乾淨狀態起手；模擬區 CD 純本地，直接清 recast group 全表。
+        // Native charge consumers also read ActionId/Total after IsActive is cleared;
+        // leaving either value behind keeps a queued multi-charge action waiting.
         for (var g = 0; g < 88; g++)
         {
             var detail = am->GetRecastGroupDetail(g);
             if (detail == null) continue;
             detail->IsActive = false;
+            detail->ActionId = 0;
             detail->Elapsed = 0f;
+            detail->Total = 0f;
         }
     }
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using AnoMech.Core.Game;
 using AnoMech.Core.Game.Party;
 using AnoMech.Core.SimObjects;
@@ -36,6 +37,11 @@ internal sealed unsafe class BlackMage : IJobStatusRules, IJobGaugeRules
     private const ushort LeyLinesStatus = 737, TriplecastStatus = 1211;
     private const ushort EnochianStatus = 868, PolyglotStatus = 3169;
     private const ushort ParadoxStatus = 3223;
+    // Native ActionTimeline 4011's continuous ground-circle component.  The
+    // embedded c1m model is authored at the 3-yalm Ley Lines radius, so it is
+    // deliberately spawned at unit scale rather than using a generic omen.
+    internal const string LeyLinesGroundVfxPath =
+        "vfx/action/ab_thm_abl012/eff/abi_thm_abl012c1m.avfx";
 
     private const float ElementStatusSeconds = 3_600f;
     private const float EnochianSeconds = 30f;
@@ -68,8 +74,15 @@ internal sealed unsafe class BlackMage : IJobStatusRules, IJobGaugeRules
     private readonly Dictionary<PartyRole, byte> umbralHearts = new();
     private sealed class LeyLinesState(Placement center)
     {
-        internal Placement Center { get; } = center;
+        internal Placement Center { get; set; } = center;
         internal float Remaining { get; set; } = LeyLinesSeconds;
+        internal SimOmen? Visual { get; set; }
+
+        internal void DespawnVisual()
+        {
+            Visual?.Despawn();
+            Visual = null;
+        }
     }
 
     // ---- IJobStatusRules -----------------------------------------------------
@@ -205,8 +218,8 @@ internal sealed unsafe class BlackMage : IJobStatusRules, IJobGaugeRules
 
 
             case LeyLines:
+                PlaceLeyLines(context, context.Player.Placement(), LeyLinesSeconds);
                 context.Grant(LeyLinesStatus, 0, LeyLinesSeconds);
-                leyLines[context.SourceRole] = new(context.Player.Placement());
                 return;
 
             case Retrace:
@@ -334,14 +347,32 @@ internal sealed unsafe class BlackMage : IJobStatusRules, IJobGaugeRules
 
     private void RefreshLeyLines(in JobActionContext context)
     {
-        var current = context.Find(LeyLinesStatus);
-        if (current is null) return;
-        var remaining = leyLines.TryGetValue(context.SourceRole, out var state)
-            ? state.Remaining
-            : current.RemainingTime;
+        // Keep the existing status requirement; moving the native circle does
+        // not renew the original deployment's lifetime.
+        if (context.Find(LeyLinesStatus) is null ||
+            !leyLines.TryGetValue(context.SourceRole, out var state)) return;
+        var remaining = state.Remaining;
         if (remaining <= 0f) return;
-        context.Grant(LeyLinesStatus, 0, MathF.Min(LeyLinesSeconds, remaining));
-        leyLines[context.SourceRole] = new(context.Player.Placement()) { Remaining = remaining };
+
+        PlaceLeyLines(context, context.Player.Placement(), remaining);
+        context.Grant(LeyLinesStatus, 0, remaining);
+    }
+
+    private void PlaceLeyLines(in JobActionContext context, Placement center, float remaining)
+    {
+        // Spawn first so a failed native/network resource resolution cannot erase
+        // an already-visible deployment. The exact c1m model is authored as the
+        // 3-yalm floor circle and is therefore kept at unit scale.
+        var visual = context.World.SpawnOmen(
+            LeyLinesGroundVfxPath, center, Vector3.One, remaining);
+        if (leyLines.TryGetValue(context.SourceRole, out var previous))
+            previous.DespawnVisual();
+
+        leyLines[context.SourceRole] = new(center)
+        {
+            Remaining = remaining,
+            Visual = visual,
+        };
     }
 
     public void Tick(in JobActionContext context, float deltaSeconds)
@@ -354,6 +385,7 @@ internal sealed unsafe class BlackMage : IJobStatusRules, IJobGaugeRules
         if (state.Remaining <= 0f)
         {
             context.Remove(LeyLinesStatus);
+            state.DespawnVisual();
             leyLines.Remove(context.SourceRole);
             return;
         }
@@ -394,9 +426,19 @@ internal sealed unsafe class BlackMage : IJobStatusRules, IJobGaugeRules
     // Main's default interface hook calls this on a new practice generation.
     public void ResetStatusState()
     {
+        foreach (var state in leyLines.Values)
+            state.DespawnVisual();
         leyLines.Clear();
         polyglotTimers.Clear();
         umbralHearts.Clear();
+    }
+
+    public void ForgetRole(PartyRole role)
+    {
+        if (leyLines.Remove(role, out var state))
+            state.DespawnVisual();
+        polyglotTimers.Remove(role);
+        umbralHearts.Remove(role);
     }
 
     // ---- local native gauge -------------------------------------------------

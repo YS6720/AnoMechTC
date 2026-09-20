@@ -8,10 +8,8 @@ using FFXIVClientStructs.FFXIV.Client.Game.Object;
 
 namespace AnoMech.Core.Combat.Jobs;
 
-// Paladin's status transitions are deliberately host-owned. Native Confiteor
-// combo fields are present in the installed schema, but their step/timer
-// semantics are not proven; the source-qualified SimStatus chain is the
-// authoritative practice state instead.
+// Status transitions remain host-owned. The local gauge projects the accepted
+// Confiteor chain: the TC native button consumer reads step 1/2/3 as Faith/Truth/Valor.
 internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
 {
     internal const byte JobId = 19;
@@ -261,6 +259,10 @@ internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
         _ = level;
         var gauge = Gauge();
         if (gauge == null) return;
+        gauge->ConfiteorComboTimer = (ushort)Math.Max(0,
+            gauge->ConfiteorComboTimer - (int)(MathF.Max(0f, deltaSeconds) * 1000f));
+        if (gauge->ConfiteorComboTimer == 0)
+            gauge->ConfiteorComboStep = 0;
         if (Plugin.PlayerInputHooks?.IsAutoAttacking != true)
         {
             autoAttackTimer = 0f;
@@ -279,10 +281,21 @@ internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
 
     public void OnLocalFire(uint actionId, bool comboOk, byte level)
     {
-        _ = comboOk;
-        _ = level;
+        // CommitAction calls this only after host acceptance. Level 90 unlocks
+        // the three blades; each accepted combo step renews the 30-second window.
         var gauge = Gauge();
         if (gauge == null) return;
+        if (actionId is Confiteor or BladeOfFaith or BladeOfTruth or BladeOfValor)
+        {
+            gauge->ConfiteorComboStep = level < 90 || !comboOk ? (byte)0 : actionId switch
+            {
+                Confiteor => (byte)1,
+                BladeOfFaith => (byte)2,
+                BladeOfTruth => (byte)3,
+                _ => (byte)0,
+            };
+            gauge->ConfiteorComboTimer = gauge->ConfiteorComboStep == 0 ? (ushort)0 : (ushort)30_000;
+        }
         if (comboOk && actionId is 15 or Prominence)
             LocalJobResources.RestoreMana(1_000);
         if (actionId is Atonement or Supplication or Sepulchre)
@@ -300,6 +313,11 @@ internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
         _ = level;
         autoAttackTimer = 0f;
         var gauge = Gauge();
-        if (gauge != null) gauge->OathGauge = OathMax;
+        if (gauge != null)
+        {
+            gauge->OathGauge = OathMax;
+            gauge->ConfiteorComboTimer = 0;
+            gauge->ConfiteorComboStep = 0;
+        }
     }
 }

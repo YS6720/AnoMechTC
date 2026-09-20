@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using AnoMech.Core.Combat;
 using AnoMech.Core.Game.Party;
 using AnoMech.Core.Map;
 using AnoMech.Core.Native;
@@ -278,6 +279,7 @@ public sealed partial class Game
         else if (!peer)
             TeleportPlayerToSpawnIfOutsideArena();
         EnsureNetworkScope(isCurrent);
+        RotationSim.Instance?.CaptureRecastsBeforePracticeReset();
         CrashTrace.Log("P: ResetSprintCooldown");
         ResetSprintCooldown();
         ResetPlayerStatuses();

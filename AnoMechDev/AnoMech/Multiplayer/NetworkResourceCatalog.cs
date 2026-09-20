@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AnoMech.Core.Combat.Jobs;
 using AnoMech.Scenarios;
 using AnoMech.Scenarios.Recorded;
 using LuminaAction = Lumina.Excel.Sheets.Action;
@@ -126,6 +127,7 @@ public sealed class NetworkResourceCatalog
         // Paths used by the current non-DSR helpers are still local resources and
         // therefore must be in the same allow-list when a scenario emits them.
         AddVisual("vfx/omen/eff/general02f.avfx", actor: false, statik: true);
+        AddVisual(BlackMage.LeyLinesGroundVfxPath, actor: false, statik: true);
         AddVisual("vfx/monster/m0114/eff/m0114cbbm_sp_pop_c0i.avfx", actor: true, statik: false);
     }
 

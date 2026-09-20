@@ -433,10 +433,32 @@ public sealed unsafe class RotationSim : IDisposable
     private readonly (bool IsActive, uint ActionId, float Elapsed, float Total)[] recastSnapshot = new (bool, uint, float, float)[RecastGroupCount];
     private bool recastSnapshotTaken;
     private long recastSnapshotAt;
+    private nint recastSnapshotPlayer;
+    private ulong recastSnapshotObjectId;
+    private byte recastSnapshotClassJob;
+    private byte recastSnapshotLevel;
     private bool wasInSim;
+
+    internal void CaptureRecastsBeforePracticeReset()
+    {
+        var am = ActionManager.Instance();
+        if (am == null) return;
+        if (!recastSnapshotTaken)
+        {
+            SnapshotRecasts(am);
+            if (!recastSnapshotTaken) return;
+        }
+        wasInSim = true;
+    }
 
     private void SnapshotRecasts(ActionManager* am)
     {
+        var local = Plugin.ObjectTable.LocalPlayer;
+        if (local == null) return;
+        recastSnapshotPlayer = local.Address;
+        recastSnapshotObjectId = (ulong)local.GameObjectId;
+        recastSnapshotClassJob = (byte)Plugin.PlayerState.ClassJob.RowId;
+        recastSnapshotLevel = (byte)Plugin.PlayerState.EffectiveLevel;
         for (var i = 0; i < RecastGroupCount; i++)
         {
             var d = am->GetRecastGroupDetail(i);
@@ -449,9 +471,19 @@ public sealed unsafe class RotationSim : IDisposable
 
     private void RestoreRecasts(ActionManager* am)
     {
-        if (!recastSnapshotTaken) return;
+        if (!recastSnapshotTaken || am == null) return;
+        var local = Plugin.ObjectTable.LocalPlayer;
+        if (local == null ||
+            local.Address != recastSnapshotPlayer ||
+            (ulong)local.GameObjectId != recastSnapshotObjectId ||
+            (byte)Plugin.PlayerState.ClassJob.RowId != recastSnapshotClassJob ||
+            (byte)Plugin.PlayerState.EffectiveLevel != recastSnapshotLevel)
+        {
+            recastSnapshotTaken = false;
+            CrashTrace.Log("[循環] 離模擬區：冷卻快照擁有者已變更，略過還原");
+            return;
+        }
         recastSnapshotTaken = false;
-        if (!LocalJobResources.OwnsPlayer) return;
         var passed = (Environment.TickCount64 - recastSnapshotAt) / 1000f;
         var restored = 0;
         for (var i = 0; i < RecastGroupCount; i++)
@@ -461,14 +493,29 @@ public sealed unsafe class RotationSim : IDisposable
             var s = recastSnapshot[i];
             if (!s.IsActive)
             {
-                if (!d->IsActive) continue;
-                d->IsActive = false; d->Elapsed = 0f;
+                if (!d->IsActive && d->ActionId == 0 && d->Elapsed == 0f && d->Total == 0f) continue;
+                d->IsActive = false;
+                d->ActionId = 0;
+                d->Elapsed = 0f;
+                d->Total = 0f;
                 restored++;
                 continue;
             }
             var elapsed = s.Elapsed + passed;
-            if (elapsed >= s.Total) { d->IsActive = false; d->Elapsed = 0f; }
-            else { d->IsActive = true; d->ActionId = s.ActionId; d->Elapsed = elapsed; d->Total = s.Total; }
+            if (elapsed >= s.Total)
+            {
+                d->IsActive = false;
+                d->ActionId = 0;
+                d->Elapsed = 0f;
+                d->Total = 0f;
+            }
+            else
+            {
+                d->IsActive = true;
+                d->ActionId = s.ActionId;
+                d->Elapsed = elapsed;
+                d->Total = s.Total;
+            }
             restored++;
         }
         CrashTrace.Log($"[循環] 離模擬區：冷卻還原 {restored} 組（經過 {passed:F0}s）");
@@ -527,15 +574,23 @@ public sealed unsafe class RotationSim : IDisposable
                 (game.World.LimitBreaks != null || TankLimitBreak.IsTank((byte)Plugin.PlayerState.ClassJob.RowId)),
                 game.ScenarioDispatchGeneration, game.World.LimitBreaks?.HasGaugeCharge);
             ObserveSoloLimitBreak(game, now);
+            var amx = ActionManager.Instance();
             if (inSim != wasInSim)
             {
-                var amx = ActionManager.Instance();
-                if (amx != null)
+                if (inSim)
                 {
-                    if (inSim) SnapshotRecasts(amx);
-                    else RestoreRecasts(amx);
+                    if (!recastSnapshotTaken && amx != null)
+                        SnapshotRecasts(amx);
                 }
+                else if (amx != null)
+                    RestoreRecasts(amx);
                 wasInSim = inSim;
+            }
+            else if (!inSim && recastSnapshotTaken && amx != null)
+            {
+                // Zone unload can briefly leave ActionManager unavailable; retry
+                // the one-shot real-world restore without taking a new snapshot.
+                RestoreRecasts(amx);
             }
             var generation = game.ScenarioDispatchGeneration;
             if (generation != schedulerGeneration || !inSim || !game.HasActivePractice)

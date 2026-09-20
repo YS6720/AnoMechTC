@@ -68,10 +68,9 @@ public unsafe class MainWindow : Window, IDisposable
     public MainWindow(Plugin plugin)
         : base(TitleWithVersion())
     {
-        // 固定邏輯尺寸，避免分頁內容改變時自動收縮；由 Dalamud 套用 UI 縮放。
+        // 只設定初次開啟尺寸；保留手動縮放，不隨分頁內容自動收縮。
         Size = new Vector2(800, 600);
-        SizeCondition = ImGuiCond.Always;
-        Flags |= ImGuiWindowFlags.NoResize;
+        SizeCondition = ImGuiCond.FirstUseEver;
 
         this.plugin = plugin;
         multiplayerPanel = new MultiplayerPanel(plugin);

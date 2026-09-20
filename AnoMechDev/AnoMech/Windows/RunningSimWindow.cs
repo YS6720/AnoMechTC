@@ -17,10 +17,10 @@ internal sealed class RunningSimWindow : Window
     {
         this.plugin = plugin;
         this.main = main;
-        // 固定邏輯尺寸，收起選項或更新練習狀態時不改變外框。
+        // 只設定初次開啟尺寸；收起選項不改變使用者調整過的外框。
         Size = new Vector2(560, 400);
-        SizeCondition = ImGuiCond.Always;
-        Flags = ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse;
+        SizeCondition = ImGuiCond.FirstUseEver;
+        Flags = ImGuiWindowFlags.NoCollapse;
         ShowCloseButton = false;
         RespectCloseHotkey = false;
         IsOpen = false;

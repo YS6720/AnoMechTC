@@ -19,6 +19,7 @@ internal interface IJobStatusRules
     void OnPartyAction(in JobActionContext context, SimCharacter actor) { }
     void OnMechanicHit(in JobActionContext context, SimCharacter target) { }
     void Tick(in JobActionContext context, float deltaSeconds) { }
+    void ForgetRole(PartyRole role) { }
     void ResetStatusState() { }
 }
 

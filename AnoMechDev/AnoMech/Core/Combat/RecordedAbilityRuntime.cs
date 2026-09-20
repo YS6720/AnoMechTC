@@ -266,6 +266,8 @@ internal sealed class RecordedAbilityRuntime
     internal void ForgetRole(PartyRole role)
     {
         roles.TryGetValue(role, out var retired);
+        if (retired is not null)
+            JobRules.StatusesFor(retired.ClassJob)?.ForgetRole(role);
         roles.Remove(role);
         foreach (var key in new List<StatusVersionKey>(statusVersions.Keys))
             if (key.SourceRole == role || (retired is not null && ReferenceEquals(key.Target, retired.Caster)))
