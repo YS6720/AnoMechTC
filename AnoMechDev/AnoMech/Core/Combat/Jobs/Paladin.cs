@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using AnoMech.Core.Game;
 using AnoMech.Core.Game.Party;
 using AnoMech.Core.SimObjects;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -18,6 +19,12 @@ internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
     // Passage of Arms is a channel. Existing input hooks call this symbol when
     // movement or another action cancels the channel.
     internal const ushort PassageOfArms = 1175;
+    private const ushort ArmsUp = 1176;
+    // Captured status 1175 param=5188 (recorded_abilities.json); native
+    // ParamEffect=4 consumes it as the channel timeline, not a stack count.
+    private const ushort PassageTimeline = 5188;
+    private const float ArmsUpSeconds = 3f;
+    private readonly Dictionary<PartyRole, Placement> passages = new();
 
     internal static void CancelChanneled(SimCharacter player)
         => player.RemoveStatusAnySource(PassageOfArms);
@@ -35,7 +42,7 @@ internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
     private const uint Intervention = 7382;
     private const uint Requiescat = 7383;
     private const uint HolySpirit = 7384;
-    private const uint Passage = 7385;
+    internal const uint Passage = 7385;
     private const uint Prominence = 16457;
     private const uint HolyCircle = 16458;
     private const uint Confiteor = 16459;
@@ -98,7 +105,7 @@ internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
             Confiteor or BladeOfFaith or BladeOfTruth or BladeOfValor
                 => [RequiescatStatus, ConfiteorReady, GloryBladeReady],
             Guardian => [GuardianStatus, GuardianShield],
-            Passage => [PassageOfArms],
+            Passage => [PassageOfArms, ArmsUp],
             GloryBlade => [GloryBladeReady],
             _ => Array.Empty<ushort>(),
         };
@@ -187,13 +194,60 @@ internal sealed unsafe class Paladin : IJobStatusRules, IJobGaugeRules
                 context.Grant(GuardianShield, 0, 15f);
                 break;
             case Passage:
-                context.Grant(PassageOfArms, 0, 18f);
+                context.Grant(PassageOfArms, PassageTimeline, 18f);
+                passages[context.SourceRole] = context.Player.Placement();
+                GrantPassageProtection(in context);
                 break;
             case GloryBlade:
                 context.Consume(GloryBladeReady);
                 break;
         }
     }
+
+    public void OnPartyAction(in JobActionContext context, SimCharacter actor)
+    {
+        if (ReferenceEquals(actor, context.Player) && context.ActionId != Passage &&
+            passages.Remove(context.SourceRole))
+            context.Remove(PassageOfArms);
+    }
+
+    public void Tick(in JobActionContext context, float deltaSeconds)
+    {
+        if (!passages.TryGetValue(context.SourceRole, out var origin)) return;
+        if (context.Find(PassageOfArms) is null || context.Player.Placement() != origin)
+        {
+            context.Remove(PassageOfArms);
+            passages.Remove(context.SourceRole);
+            return;
+        }
+        GrantPassageProtection(in context);
+    }
+
+    private static void GrantPassageProtection(in JobActionContext context)
+    {
+        if (context.Find(PassageOfArms) is null) return;
+        var origin = context.Player.Placement();
+        var radius = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>()
+            .GetRow(Passage).EffectRange;
+        var backX = -MathF.Sin(origin.Rotation);
+        var backZ = -MathF.Cos(origin.Rotation);
+        // Rear 90-degree cone; use live positions for a persistent field, not
+        // CharacterFind's delayed mechanic snapshots. Leaving retains the 3s buff.
+        foreach (var member in context.World.Party.ActiveMembers())
+        {
+            if (ReferenceEquals(member, context.Player)) continue;
+            var dx = member.Position.X - origin.Position.X;
+            var dz = member.Position.Z - origin.Position.Z;
+            var distanceSq = dx * dx + dz * dz;
+            var behind = dx * backX + dz * backZ;
+            if (distanceSq <= radius * radius && behind >= 0f &&
+                2f * behind * behind >= distanceSq)
+                context.Grant(ArmsUp, 0, ArmsUpSeconds, member);
+        }
+    }
+
+    public void ForgetRole(PartyRole role) => passages.Remove(role);
+    public void ResetStatusState() => passages.Clear();
 
     private static void ConsumeConfiteorStep(in JobActionContext context)
     {

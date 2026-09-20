@@ -53,25 +53,26 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
     public override void Tick(float deltaSeconds)
     {
         base.Tick(deltaSeconds);
-        SampleActivity();
-        // 引導技（武裝戌守）在移動或按技能的那一幀就結束，跟遊戲本體一致。
-        if (IsMoving) Combat.Jobs.Paladin.CancelChanneled(this);
+        // Activity includes Passage's activation; only movement or another action cancels it.
+        if (SampleActivity()) Combat.Jobs.Paladin.CancelChanneled(this);
         SyncInputLock();
     }
 
-    private void SampleActivity()
+    private bool SampleActivity()
     {
         var hooks = Plugin.PlayerInputHooks;
         // Drain the action latch every frame — even while dead — so a stale press can't carry over.
-        var actedThisFrame = hooks.PollActionUsed();
+        var actedThisFrame = hooks.PollActionUsed(out var interruptsChannel);
         if (Dead)
         {
             IsMoving = false;
             IsActing = false;
-            return;
+            return false;
         }
-        IsMoving = hooks.MovementInputActive || actedThisFrame || hooks.IsJumping;
+        var moving = hooks.MovementInputActive || hooks.IsJumping;
+        IsMoving = moving || actedThisFrame;
         IsActing = IsMoving || hooks.IsAutoAttacking;
+        return moving || interruptsChannel;
     }
 
     internal SelfPoseMessage SampleNetworkPose(bool sampleActivity = false)

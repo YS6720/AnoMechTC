@@ -50,11 +50,21 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
     // Latched whenever the player actually fires a real action; drained once per frame by SimPlayer
     // (PollActionUsed) so a same-frame action press is still observable to a snapshot mechanic.
     private bool actionUsedSincePoll;
-    public bool PollActionUsed()
+    private bool channelInterruptSincePoll;
+    public bool PollActionUsed(out bool interruptsChannel)
     {
         var used = actionUsedSincePoll;
+        interruptsChannel = channelInterruptSincePoll;
+        channelInterruptSincePoll = false;
         actionUsedSincePoll = false;
         return used;
+    }
+
+    private void RecordActionUsed(ActionType actionType, uint actionId)
+    {
+        actionUsedSincePoll = true;
+        // Passage's own activation counts for stillness mechanics, not channel cancellation.
+        channelInterruptSincePoll |= actionType != ActionType.Action || actionId != Combat.Jobs.Paladin.Passage;
     }
 
     private delegate void RMIWalkDelegate(void* self, float* sumLeft, float* sumForward, float* sumTurnLeft, byte* haveBackwardOrStrafe, byte* a6, byte bAdditiveUnk);
@@ -233,7 +243,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
                     var accepted = StartPracticeLimitBreak(runtime, lbAction, null,
                         ResolveLimitBreakTarget(targetId));
                     CrashTrace.Log($"[LB] 確認施放 action={lbAction} accepted={accepted} ground=False");
-                    if (accepted) actionUsedSincePoll = true;
+                    if (accepted) RecordActionUsed(ActionType.Action, lbAction);
                     return accepted ? (byte)1 : (byte)0;
                 }
                 // Preserve the native placement circle. UseActionLocation below
@@ -252,7 +262,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         }
         var result = useActionHook.Original(self, actionType, actionId, targetId, extraParam, mode, comboRouteId, outOptAreaTargeted);
         if (result != 0 && !IsStopAutosAction(actionType, actionId))
-            actionUsedSincePoll = true;
+            RecordActionUsed(actionType, actionId);
         return result;
     }
 
@@ -272,7 +282,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
                 var accepted = StartPracticeLimitBreak(runtime, lbAction, localPoint,
                     ResolveLimitBreakTarget(targetId));
                 CrashTrace.Log($"[LB] 確認施放 action={lbAction} accepted={accepted} ground={row.TargetArea}");
-                if (accepted) actionUsedSincePoll = true;
+                if (accepted) RecordActionUsed(ActionType.Action, lbAction);
                 return accepted ? (byte)1 : (byte)0;
             }
         }
@@ -295,7 +305,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         if (ordinaryGround)
             rotation!.CompleteGroundAction(self, actionId, Plugin.GameInstance.World.Coordinates.ToLocal(*location),
                 sequenceBefore, manaCost, idle, result);
-        if (result != 0) actionUsedSincePoll = true;
+        if (result != 0) RecordActionUsed(actionType, actionId);
         return result;
     }
 

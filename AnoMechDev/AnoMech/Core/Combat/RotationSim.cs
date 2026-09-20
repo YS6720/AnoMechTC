@@ -109,6 +109,7 @@ public sealed unsafe class RotationSim : IDisposable
         byte ret;
         var statusActionId = actionId;
         var generalTankLimitBreak = false;
+        var generalSprint = false;
         var ordinary = false;
         var adjustedAction = actionId;
         var manaCost = 0;
@@ -126,6 +127,13 @@ public sealed unsafe class RotationSim : IDisposable
                  Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(actionId)?.ActionCategory.RowId == 9))
                 return hook!.Original(am, actionType, actionId, targetId, extraParam, mode, comboRouteId, outOpt);
             var classJob = (byte)Plugin.PlayerState.ClassJob.RowId;
+            // The Sprint hotbar entry is a GeneralAction; its nested Action call
+            // is deliberately not submitted again by the outermost-only guard.
+            generalSprint = practice is { HasActivePractice: true } && practice.World.Map.IsInInstance &&
+                actionType == ActionType.GeneralAction &&
+                Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.GeneralAction>()
+                    .GetRowOrDefault(actionId)?.Action.RowId == 3;
+            if (generalSprint) statusActionId = 3;
             var limitBreakPressed = actionType == ActionType.GeneralAction && actionId == TankLimitBreak.GeneralActionId ||
                 actionType == ActionType.Action && TankLimitBreak.TryGetStatus(actionId, classJob, out _, out _);
             if (practice is { HasActivePractice: true, IsNetworkPeer: false } &&
@@ -166,7 +174,7 @@ public sealed unsafe class RotationSim : IDisposable
                         (byte)Plugin.PlayerState.ClassJob.RowId, out _, out _);
                 }
             }
-            ordinary = outermost && actionType == ActionType.Action &&
+            ordinary = outermost && (actionType == ActionType.Action || generalSprint) &&
                 practice is { HasActivePractice: true } && practice.World.Map.IsInInstance &&
                 JobRules.Supports(classJob);
             if (ordinary)
@@ -175,7 +183,7 @@ public sealed unsafe class RotationSim : IDisposable
                 UpdateOrdinaryCast(am, Environment.TickCount64);
                 if (awaitingAction != null) return 0;
                 LocalJobResources.Flush();
-                adjustedAction = am->GetAdjustedActionId(actionId);
+                adjustedAction = am->GetAdjustedActionId(statusActionId);
                 var row = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(adjustedAction);
                 if (row is not { } action || !JobRules.IsAvailableAction(action, classJob,
                         (byte)Plugin.PlayerState.EffectiveLevel)) return 0;
@@ -220,8 +228,9 @@ public sealed unsafe class RotationSim : IDisposable
                 CrashTrace.Log($"[循環] 按鍵被拒 a={actionId} adjusted={adjusted} status={status} {text}");
             }
             if (ret != 0 && canProcess && !areaTargeted && outermost &&
-                (actionType == ActionType.Action || generalTankLimitBreak))
-                OnActionUsed(am, ordinary ? adjustedAction : statusActionId, targetId,
+                (actionType == ActionType.Action || generalTankLimitBreak || generalSprint))
+                OnActionUsed(am, ordinary ? adjustedAction : statusActionId,
+                    statusActionId == 3 ? 0 : targetId,
                     sequenceBefore, manaCost, cooldownWasIdle);
             if (ordinary) LocalJobResources.Flush();
             if (generalTankLimitBreak)

@@ -95,7 +95,10 @@ internal static class JobRules
 
     internal static bool IsAvailableAction(Lumina.Excel.Sheets.Action action, byte classJob, byte level)
     {
-        if (action.IsPvP || action.ClassJobLevel == 0 || action.ClassJobLevel > level) return false;
+        if (action.IsPvP) return false;
+        // Sprint (Action 3) is a general action with ClassJobLevel 0, not a job unlock.
+        if (action.RowId == 3) return level > 0 && Supports(classJob);
+        if (action.ClassJobLevel == 0 || action.ClassJobLevel > level) return false;
         var jobs = action.ClassJobCategory.Value;
         return classJob switch
         {
