@@ -5,6 +5,9 @@ using AnoMech.Core.Native;
 using Dalamud.Hooking;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
+using FFXIVClientStructs.FFXIV.Client.Game.Group;
+using FFXIVClientStructs.FFXIV.Client.Game.UI;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 
 namespace AnoMech.Core.Combat;
 
@@ -32,6 +35,9 @@ public sealed unsafe class RotationSim : IDisposable
     private int diagLeft = 12;
     private long schedulerGeneration;
     private long lastUpdateMilliseconds;
+    private long limitBreakProbeGeneration = -1;
+    private long limitBreakProbeAt;
+    private int limitBreakProbeRemaining;
 
     // ActionCombo 反查：有哪些 action 以 X 為前置（＝用了 X 之後連段燈該亮）。
     private readonly HashSet<uint> startsCombo = new();
@@ -83,6 +89,38 @@ public sealed unsafe class RotationSim : IDisposable
         try
         {
             var practice = Plugin.GameInstance;
+            // P6 owns all LB jobs and ground-target commits in LocalPlayerInputHooks.
+            // Do not also submit through ordinary rotation/status bookkeeping.
+            if (practice?.World.LimitBreaks != null &&
+                (actionType == ActionType.GeneralAction && actionId == TankLimitBreak.GeneralActionId ||
+                 actionType == ActionType.Action &&
+                 Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(actionId)?.ActionCategory.RowId == 9))
+                return hook!.Original(am, actionType, actionId, targetId, extraParam, mode, comboRouteId, outOpt);
+            var classJob = (byte)Plugin.PlayerState.ClassJob.RowId;
+            var limitBreakPressed = actionType == ActionType.GeneralAction && actionId == TankLimitBreak.GeneralActionId ||
+                actionType == ActionType.Action && TankLimitBreak.TryGetStatus(actionId, classJob, out _, out _);
+            if (practice is { HasActivePractice: true, IsNetworkPeer: false } &&
+                practice.World.Map.IsInInstance && practice.Multiplayer?.HasSession != true &&
+                TankLimitBreak.IsTank(classJob) && limitBreakPressed)
+            {
+                // A simulated party is not a native party. Submit locally instead
+                // of requiring the real server/client's solo LB eligibility.
+                if (practice.Paused || Plugin.PlayerInputHooks.DisableAllActions) return 0;
+                limitBreakGauge.Update(true, practice.ScenarioDispatchGeneration);
+                var localGauge = FFXIVClientStructs.FFXIV.Client.Game.UI.LimitBreakController.StaticAddressPointers.pInstance;
+                var localPlayer = Player();
+                if (!limitBreakGauge.IsAvailable || localGauge == null || localPlayer == null) return 0;
+                var localAction = localGauge->GetActionId(localPlayer, 2);
+                if (!TankLimitBreak.TryGetStatus(localAction, classJob, out _, out _) ||
+                    !practice.Abilities.TryUse(practice.World.Party.PlayerRole, localAction, classJob,
+                        (byte)Plugin.PlayerState.EffectiveLevel, null))
+                    return 0;
+                limitBreakGauge.Consume();
+                if (outOpt != null) *outOpt = false;
+                FirePlayerActionEffect(localAction, selfTarget: true);
+                CrashTrace.Log($"[LB] 單人練習施放 a={localAction}；本輪量表已消耗，只顯示狀態。");
+                return 1;
+            }
             if (practice is { HasActivePractice: true, Paused: false } &&
                 practice.World.Map.IsInInstance &&
                 TankLimitBreak.IsTank((byte)Plugin.PlayerState.ClassJob.RowId) &&
@@ -301,14 +339,14 @@ public sealed unsafe class RotationSim : IDisposable
     /// </summary>
     private static uint globalSeq = 0x40000000;
 
-    private static void FirePlayerActionEffect(uint actionId, ushort sourceSequence = 0)
+    private static void FirePlayerActionEffect(uint actionId, ushort sourceSequence = 0, bool selfTarget = false)
     {
         var lp = Plugin.ObjectTable.LocalPlayer;
         if (lp == null) return;
         var chara = (Character*)lp.Address;
         const uint NullObjectId = 0xE0000000;
-        var oid = NullObjectId;
-        if (lp.TargetObject is { } t)
+        var oid = selfTarget ? chara->EntityId : NullObjectId;
+        if (!selfTarget && lp.TargetObject is { } t)
         {
             var cm = CharacterManager.Instance();
             if (cm != null && cm->LookupBattleCharaByEntityId(t.EntityId) != null)
@@ -393,6 +431,45 @@ public sealed unsafe class RotationSim : IDisposable
         CrashTrace.Log($"[循環] 離模擬區：冷卻還原 {restored} 組（經過 {passed:F0}s）");
     }
 
+    // Temporary solo-LB boundary evidence: at most three snapshots per run,
+    // no native writes/input. Remove after HUD/eligibility has been verified.
+    private void ObserveSoloLimitBreak(Game.Game game, long now)
+    {
+        if (!game.HasActivePractice || !game.World.Map.IsInInstance ||
+            game.IsNetworkPeer || game.Multiplayer?.HasSession == true ||
+            game.World.LimitBreaks is not { } runtime)
+            return;
+        if (limitBreakProbeGeneration != game.ScenarioDispatchGeneration)
+        {
+            limitBreakProbeGeneration = game.ScenarioDispatchGeneration;
+            limitBreakProbeRemaining = 3;
+            limitBreakProbeAt = now + 1000;
+        }
+        if (limitBreakProbeRemaining == 0 || now < limitBreakProbeAt) return;
+        limitBreakProbeRemaining--;
+        limitBreakProbeAt = now + 2000;
+        var gauge = LimitBreakController.StaticAddressPointers.pInstance;
+        var group = GroupManager.Instance();
+        var manager = ActionManager.Instance();
+        var addon = (AtkUnitBase*)Plugin.GameGui.GetAddonByName("_LimitBreak").Address;
+        var stage = AtkStage.Instance();
+        var holder = stage == null ? null : stage->AtkArrayDataHolder;
+        var numbers = holder == null ? null : holder->GetNumberArrayData((int)NumberArrayType.LimitBreak);
+        var action = runtime.ActionFor(game.World.Party.PlayerRole);
+        var generalStatus = manager == null ? uint.MaxValue :
+            manager->GetActionStatus(ActionType.GeneralAction, TankLimitBreak.GeneralActionId);
+        var actionStatus = manager == null || action == 0 ? uint.MaxValue :
+            manager->GetActionStatus(ActionType.Action, action);
+        CrashTrace.Log($"[LB診斷] solo party={(group == null ? -1 : group->MainGroup.MemberCount)}"
+            + $" gauge={(gauge == null ? "missing" : $"{gauge->BarCount}/{gauge->CurrentUnits}/{gauge->BarUnits}")}"
+            + $" clientPvP={Plugin.ClientState.IsPvP} controllerPvP={(gauge == null ? "missing" : gauge->IsPvP.ToString())}"
+            + $" addon={addon != null} visible={addon != null && addon->IsVisible}"
+            + $" arraySize={(numbers == null ? -1 : numbers->Size)}"
+            + $" subscribers={(numbers == null ? -1 : numbers->SubscribedAddonsCount)}"
+            + $" update={(numbers == null ? -1 : numbers->UpdateState)}"
+            + $" generalStatus={generalStatus} action={action} actionStatus={actionStatus} ready={runtime.IsAvailable}");
+    }
+
     private void ReassertCombo(Dalamud.Plugin.Services.IFramework _)
     {
         try
@@ -404,7 +481,9 @@ public sealed unsafe class RotationSim : IDisposable
             lastUpdateMilliseconds = now;
             var inSim = game.World.Map.IsInInstance;
             limitBreakGauge.Update(inSim && game.HasActivePractice &&
-                TankLimitBreak.IsTank((byte)Plugin.PlayerState.ClassJob.RowId), game.ScenarioDispatchGeneration);
+                (game.World.LimitBreaks != null || TankLimitBreak.IsTank((byte)Plugin.PlayerState.ClassJob.RowId)),
+                game.ScenarioDispatchGeneration, game.World.LimitBreaks?.IsAvailable);
+            ObserveSoloLimitBreak(game, now);
             if (inSim != wasInSim)
             {
                 var amx = ActionManager.Instance();

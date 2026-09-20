@@ -21,6 +21,12 @@ internal sealed class RecordedAbilityRuntime
     private const float SprintDuration = 10f;
     private const uint ReprisalActionId = 7535;
     private const ushort ReprisalStatusId = 1193;
+    private const uint DivineVeilActionId = 3540;
+    private const ushort DivineVeilStatusId = 1362;
+    private const uint InterventionActionId = 7382;
+    private const ushort InterventionStatusId = 1174;
+    private const ushort KnightsResolveStatusId = 2675;
+    private const ushort KnightsBenedictionStatusId = 2676;
 
     private readonly Game.Game game;
     private readonly RecordedAbilityCatalog catalog;
@@ -70,7 +76,21 @@ internal sealed class RecordedAbilityRuntime
         var jobRules = JobRules.StatusesFor(classJob);
         var reprisal = actionId == ReprisalActionId && TankLimitBreak.IsTank(classJob) && level >= 22;
         var tankLimitBreak = TankLimitBreak.TryGetStatus(actionId, classJob, out var lbStatus, out var lbDuration);
-        var explicitDefault = actionId == SprintActionId || reprisal || tankLimitBreak ||
+        var supportAction = classJob == Paladin.JobId && actionId is DivineVeilActionId or InterventionActionId
+            ? Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRow(actionId)
+            : default;
+        var divineVeil = supportAction.RowId == DivineVeilActionId && level >= supportAction.ClassJobLevel;
+        var intervention = supportAction.RowId == InterventionActionId && level >= supportAction.ClassJobLevel;
+        if (supportAction.RowId != 0 && !divineVeil && !intervention) return false;
+        // Intervention is party-targeted, never self/enemy. Resolve and validate
+        // the submitted actor rather than reading the player's later selection.
+        if (intervention &&
+            (target is not ISimPartyMember targetMember || !IsUsableActor(target) ||
+             ReferenceEquals(caster, target) ||
+             !ReferenceEquals(game.World.Party.Get(targetMember.Role), target) ||
+             caster.Placement().DistanceSq(target) > supportAction.Range * supportAction.Range))
+            return false;
+        var explicitDefault = actionId == SprintActionId || reprisal || tankLimitBreak || divineVeil || intervention ||
             (jobRules?.IsKnownAction(actionId) == true);
         if (!observed && !explicitDefault) return false;
 
@@ -129,11 +149,36 @@ internal sealed class RecordedAbilityRuntime
                 if (state.Caster.Placement().DistanceSq(member) <= radius * radius)
                     QueueApply(state, member, lbStatus, 0, lbDuration, 0f);
         }
+        // Taiwan Action/ActionTransient: Veil grants the same 30s barrier to
+        // self and nearby party. The recording catalog only observed self.
+        if (divineVeil)
+        {
+            var radius = supportAction.EffectRange;
+            foreach (var member in game.World.Party.ActiveMembers())
+                if (IsUsableActor(member) && state.Caster.Placement().DistanceSq(member) <= radius * radius)
+                    QueueApply(state, member, DivineVeilStatusId, 0, 30f, 0f);
+        }
+        if (intervention)
+        {
+            // Enhanced Intervention (Trait 413): 8s + Resolve 4s + Benediction
+            // 12s. Before the trait, the base status lasts 6s. Status display
+            // only, like Reprisal and tank LB; no HP/mitigation model here.
+            var enhanced = level >= Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Trait>().GetRow(413).Level;
+            QueueApply(state, target!, InterventionStatusId, 0, enhanced ? 8f : 6f, 0f);
+            if (enhanced)
+            {
+                QueueApply(state, target!, KnightsResolveStatusId, 0, 4f, 0f);
+                QueueApply(state, target!, KnightsBenedictionStatusId, 0, 12f, 0f);
+            }
+        }
 
         foreach (var rule in rules)
         {
             if (rule.ActionId == SprintActionId && rule.StatusId == SprintStatusId) continue;
             if (reprisal && rule.StatusId == ReprisalStatusId || tankLimitBreak && rule.StatusId == lbStatus) continue;
+            if (divineVeil && rule.StatusId == DivineVeilStatusId ||
+                intervention && rule.StatusId is InterventionStatusId or KnightsResolveStatusId or KnightsBenedictionStatusId)
+                continue;
             if (jobRules != null && JobRules.IsOwnedTransition(jobRules, actionId, rule.StatusId)) continue;
             var recipient = rule.TargetKind == RecordedAbilityTargetKind.Self ? state.Caster : target!;
             QueueApply(state, recipient, rule.StatusId, rule.Param!.Value, rule.DurationSeconds, rule.DelaySeconds);

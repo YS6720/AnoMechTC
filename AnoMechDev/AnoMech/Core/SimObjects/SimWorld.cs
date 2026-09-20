@@ -5,13 +5,13 @@ using System.Linq;
 using System.Numerics;
 using System.Text;
 using AnoMech.Core;
+using AnoMech.Core.Combat;
 using AnoMech.Core.Game;
 using AnoMech.Core.Game.Ai;
 using AnoMech.Core.Game.Geometry;
 using AnoMech.Core.Game.Party;
 using AnoMech.Core.Map;
 using AnoMech.Multiplayer;
-
 namespace AnoMech.Core.SimObjects;
 
 public enum ScenarioResult
@@ -50,6 +50,8 @@ public sealed class SimWorld : ISimObject, IDisposable
 
     // Convenience reference — SimParty.Empty until CreateParty is called.
     public SimParty Party { get; private set; } = SimParty.Empty;
+    /// <summary>Scenario-owned limit-break runtime; null outside an active run.</summary>
+    internal PracticeLimitBreakRuntime? LimitBreaks { get; set; }
     /// <summary>Explicit result of the current scenario round.</summary>
     public ScenarioResult Result { get; private set; }
 
@@ -336,6 +338,7 @@ public sealed class SimWorld : ISimObject, IDisposable
     {
         Map.Tick();
         children.Update(deltaSeconds);
+        LimitBreaks?.Tick(deltaSeconds);
         enmityHud.Refresh(children.OfType<SimEnemy>(), deltaSeconds);
         partyHud.Refresh(Party);
         // P133 reads configuration only here; the adapter never changes party data.
@@ -349,6 +352,8 @@ public sealed class SimWorld : ISimObject, IDisposable
     public void Despawn()
     {
         networkEventSink = null;
+        LimitBreaks?.Dispose();
+        LimitBreaks = null;
         children.Despawn();
         Party = SimParty.Empty;
         Result = ScenarioResult.Idle;

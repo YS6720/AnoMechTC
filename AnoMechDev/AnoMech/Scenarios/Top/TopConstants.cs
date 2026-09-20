@@ -267,6 +267,7 @@ public static class TopConstants
         public const ushort HPPenalty = 3401;
         public const ushort CodeMi = 3447;                          // 0xD77 — P6 Alpha Omega 'Code M/i' form
         public const ushort BrilliantDynamis = 3446;
+        public const ushort RadiantDynamis = 3448;
     }
 
     public static class TetherId

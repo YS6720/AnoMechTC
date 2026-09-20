@@ -61,9 +61,10 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
 
     // True while the character is rooted by an in-progress action (cast bar up or
     // release animation still playing). The Movement subsystem reads this to hold
-    // an active follow in place until the animation finishes. Default false; types
-    // that simulate casts (SimEnemy) override it.
-    public virtual bool AnimationLock => false;
+    // an active follow in place until the animation finishes. Practice LB recovery
+    // is independent of the shared gauge; SimEnemy owns its own cast lock.
+    internal bool LimitBreakRecovery { get; set; }
+    public virtual bool AnimationLock => LimitBreakRecovery;
 
     public GameObjectId GameObjectId => BattleCharaPtr == null ? default : BattleCharaPtr->GetGameObjectId();
     public float HitboxRadius => BattleCharaPtr == null ? 0f : BattleCharaPtr->HitboxRadius;
@@ -88,6 +89,7 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
 
     public virtual void Despawn()
     {
+        LimitBreakRecovery = false;
         statusList.Despawn();
         vfx.Despawn();
     }

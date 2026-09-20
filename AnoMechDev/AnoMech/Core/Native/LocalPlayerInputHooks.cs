@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using AnoMech.Core.SimObjects;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
@@ -71,8 +72,17 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
 
     private readonly Hook<InputData.Delegates.IsInputIdPressed> isInputIdPressedHook;
     private readonly Hook<ActionManager.Delegates.Update> updateHook;
-    private readonly Hook<ActionManager.Delegates.UseAction> useActionHook;
-    private readonly Hook<ActionManager.Delegates.UseActionLocation> useActionLocationHook;
+    // TC signatures match NoClippy.Game: byte return, including UseActionLocation's final byte.
+    private delegate byte UseActionDelegate(ActionManager* self, ActionType actionType, uint actionId, ulong targetId, uint extraParam, ActionManager.UseActionMode mode, uint comboRouteId, bool* outOptAreaTargeted);
+    private delegate byte UseActionLocationDelegate(ActionManager* self, ActionType actionType, uint actionId, ulong targetId, Vector3* location, uint extraParam, byte a7);
+    private readonly Hook<UseActionDelegate> useActionHook;
+    private readonly Hook<UseActionLocationDelegate> useActionLocationHook;
+    // BossMod ActionManagerEx.GetActionStatus uses these seven arguments.
+    // Keep native booleans byte-sized; the uint return is a LogMessage row, not bool.
+    // TC callsite verified unique, target 0x89FCA0 (2026-09-20).
+    private delegate uint GetActionStatusDelegate(ActionManager* self, ActionType actionType, uint actionId,
+        ulong targetId, byte checkRecastActive, byte checkCastingActive, uint* outOptExtraInfo);
+    private readonly Hook<GetActionStatusDelegate> getActionStatusHook;
 
     public LocalPlayerInputHooks(IGameInteropProvider hook)
     {
@@ -82,10 +92,12 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
             InputData.Addresses.IsInputIdPressed.Value, IsInputIdPressedDetour);
         updateHook = hook.HookFromAddress<ActionManager.Delegates.Update>(
             ActionManager.Addresses.Update.Value, UpdateDetour);
-        useActionHook = hook.HookFromAddress<ActionManager.Delegates.UseAction>(
+        useActionHook = hook.HookFromAddress<UseActionDelegate>(
             ActionManager.Addresses.UseAction.Value, UseActionDetour);
-        useActionLocationHook = hook.HookFromAddress<ActionManager.Delegates.UseActionLocation>(
+        useActionLocationHook = hook.HookFromAddress<UseActionLocationDelegate>(
             ActionManager.Addresses.UseActionLocation.Value, UseActionLocationDetour);
+        getActionStatusHook = hook.HookFromAddress<GetActionStatusDelegate>(
+            ActionManager.Addresses.GetActionStatus.Value, GetActionStatusDetour);
 
         rmiWalkHook.Enable();
         checkStrafeKeybindHook.Enable();
@@ -93,6 +105,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         updateHook.Enable();
         useActionHook.Enable();
         useActionLocationHook.Enable();
+        getActionStatusHook.Enable();
     }
 
     public void Dispose()
@@ -103,6 +116,7 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         updateHook?.Dispose();
         useActionHook?.Dispose();
         useActionLocationHook?.Dispose();
+        getActionStatusHook?.Dispose();
     }
 
     private void RMIWalkDetour(void* self, float* sumLeft, float* sumForward, float* sumTurnLeft, byte* haveBackwardOrStrafe, byte* a6, byte bAdditiveUnk)
@@ -141,25 +155,124 @@ public sealed unsafe class LocalPlayerInputHooks : IDisposable
         if (autosOn) self->UseAction(ActionType.GeneralAction, 1);
     }
 
-    private bool UseActionDetour(ActionManager* self, ActionType actionType, uint actionId, ulong targetId, uint extraParam, ActionManager.UseActionMode mode, uint comboRouteId, bool* outOptAreaTargeted)
+    private uint GetActionStatusDetour(ActionManager* self, ActionType actionType, uint actionId,
+        ulong targetId, byte checkRecastActive, byte checkCastingActive, uint* outOptExtraInfo)
     {
-        if (SimulationPaused && actionType == ActionType.Action) return false;
-        if (DisableAllActions && !IsStopAutosAction(actionType, actionId)) return false;
+        var nativeStatus = getActionStatusHook.Original(self, actionType, actionId, targetId,
+            checkRecastActive, checkCastingActive, outOptExtraInfo);
+        // Full practice gauge still reports 574 in the native solo territory.
+        // Project only this eligibility boundary; retain range/target/recast errors,
+        // all unrelated actions, and every live-party/PvP/outside-practice query.
+        if (nativeStatus is not (0 or 574) ||
+            !TryGetPracticeLimitBreak(actionType, actionId, out var runtime, out var action) ||
+            action == 0 || actionType == ActionType.Action && actionId != action)
+            return nativeStatus;
+
+        var game = Plugin.GameInstance;
+        var role = game.World.Party.PlayerRole;
+        var player = game.World.Party.Get(role);
+        if (game.Paused || DisableAllActions || !runtime.IsAvailable || runtime.IsBusy(role) ||
+            player is not { IsActive: true } || !player.IsAlive())
+            return nativeStatus == 0 ? 574u : nativeStatus;
+
+        if (outOptExtraInfo != null) *outOptExtraInfo = 0;
+        return 0;
+    }
+
+    private byte UseActionDetour(ActionManager* self, ActionType actionType, uint actionId, ulong targetId, uint extraParam, ActionManager.UseActionMode mode, uint comboRouteId, bool* outOptAreaTargeted)
+    {
+        if (SimulationPaused && actionType == ActionType.Action) return 0;
+        if (DisableAllActions && !IsStopAutosAction(actionType, actionId)) return 0;
+        try
+        {
+            if (TryGetPracticeLimitBreak(actionType, actionId, out var runtime, out var lbAction))
+            {
+                var game = Plugin.GameInstance;
+                CrashTrace.Log($"[LB] 按鍵 type={actionType} id={actionId} action={lbAction} ready={runtime.IsAvailable} paused={game.Paused}");
+                if (game.Paused || !runtime.IsAvailable || lbAction == 0) return 0;
+                var row = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRow(lbAction);
+                if (!row.TargetArea)
+                {
+                    if (outOptAreaTargeted != null) *outOptAreaTargeted = false;
+                    var accepted = runtime.TryStart(game.World.Party.PlayerRole, lbAction,
+                        target: ResolveLimitBreakTarget(targetId));
+                    if (accepted) actionUsedSincePoll = true;
+                    return accepted ? (byte)1 : (byte)0;
+                }
+                // Preserve the native placement circle. UseActionLocation below
+                // commits its chosen point; opening/cancelling the circle spends no LB.
+                var placed = useActionHook.Original(self, ActionType.Action, lbAction, targetId,
+                    extraParam, mode, comboRouteId, outOptAreaTargeted);
+                if (placed == 0)
+                    CrashTrace.Log($"[LB] 地面選圈被拒 action={lbAction} status={self->GetActionStatus(ActionType.Action, lbAction, targetId)}");
+                return placed;
+            }
+        }
+        catch (Exception ex)
+        {
+            CrashTrace.Log($"[LB] 按鍵處理失敗：{ex.Message}");
+            return 0;
+        }
         var result = useActionHook.Original(self, actionType, actionId, targetId, extraParam, mode, comboRouteId, outOptAreaTargeted);
-        // Record a real action use for Party.Player.IsActing — but ignore the auto-attack-cancel
-        // general action that UpdateDetour issues while stunned.
-        if (result && !IsStopAutosAction(actionType, actionId))
+        if (result != 0 && !IsStopAutosAction(actionType, actionId))
             actionUsedSincePoll = true;
         return result;
     }
 
-    private bool UseActionLocationDetour(ActionManager* self, ActionType actionType, uint actionId, ulong targetId, Vector3* location, uint extraParam, byte a7)
+    private byte UseActionLocationDetour(ActionManager* self, ActionType actionType, uint actionId, ulong targetId, Vector3* location, uint extraParam, byte a7)
     {
-        if (SimulationPaused && actionType == ActionType.Action) return false;
-        if (DisableAllActions && !IsStopAutosAction(actionType, actionId)) return false;
+        if (SimulationPaused && actionType == ActionType.Action) return 0;
+        if (DisableAllActions && !IsStopAutosAction(actionType, actionId)) return 0;
+        try
+        {
+            if (TryGetPracticeLimitBreak(actionType, actionId, out var runtime, out var lbAction))
+            {
+                var game = Plugin.GameInstance;
+                if (game.Paused || !runtime.IsAvailable || lbAction == 0) return 0;
+                var row = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRow(lbAction);
+                if (row.TargetArea && location == null) return 0;
+                var localPoint = row.TargetArea ? game.World.Coordinates.ToLocal(*location) : (Vector3?)null;
+                var accepted = runtime.TryStart(game.World.Party.PlayerRole, lbAction, localPoint,
+                    ResolveLimitBreakTarget(targetId));
+                CrashTrace.Log($"[LB] 確認施放 action={lbAction} accepted={accepted} ground={row.TargetArea}");
+                if (accepted) actionUsedSincePoll = true;
+                return accepted ? (byte)1 : (byte)0;
+            }
+        }
+        catch (Exception ex)
+        {
+            CrashTrace.Log($"[LB] 地面施放處理失敗：{ex.Message}");
+            return 0;
+        }
         var result = useActionLocationHook.Original(self, actionType, actionId, targetId, location, extraParam, a7);
-        if (result) actionUsedSincePoll = true;
+        if (result != 0) actionUsedSincePoll = true;
         return result;
+    }
+
+    private static bool TryGetPracticeLimitBreak(ActionType type, uint id,
+        out Combat.PracticeLimitBreakRuntime runtime, out uint action)
+    {
+        runtime = null!;
+        action = 0;
+        var game = Plugin.GameInstance;
+        if (game is not { HasActivePractice: true, IsNetworkPeer: false } ||
+            !game.World.Map.IsInInstance || game.Multiplayer?.HasSession == true ||
+            game.World.LimitBreaks is not { } active)
+            return false;
+        var requested = type == ActionType.GeneralAction && id == Combat.TankLimitBreak.GeneralActionId ||
+            type == ActionType.Action &&
+            Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(id)?.ActionCategory.RowId == 9;
+        if (!requested) return false;
+        runtime = active;
+        action = active.ActionFor(game.World.Party.PlayerRole);
+        return true;
+    }
+
+    private static SimObjects.SimCharacter? ResolveLimitBreakTarget(ulong targetId)
+    {
+        if (targetId is 0 or 0xE0000000)
+            targetId = Plugin.ObjectTable.LocalPlayer?.TargetObject?.EntityId ?? 0;
+        return Plugin.GameInstance.ResolveAbilityActor(targetId);
     }
 
     private static bool SimulationPaused

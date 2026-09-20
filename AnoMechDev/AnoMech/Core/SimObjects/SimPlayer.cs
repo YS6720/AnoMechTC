@@ -47,8 +47,8 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
     public void Knockback(Vector3 source, float distance, float speed) => Movement.Knockback(source, distance, speed);
 
     // The player's input lock is a pure function of its own state, re-derived
-    // every tick: movement is frozen while KO'd or being force-slid by a
-    // knockback; actions are blocked only while KO'd. base.Tick advances Movement
+    // every tick: movement is frozen while KO'd, force-slid, or in LB recovery;
+    // actions are blocked while KO'd or in LB recovery. base.Tick advances Movement
     // first, so a slide that arrives this frame has already cleared IsMoving.
     public override void Tick(float deltaSeconds)
     {
@@ -132,10 +132,10 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
         SyncInputLock();
     }
 
-    private void SyncInputLock()
+    internal void SyncInputLock()
     {
         var hooks = Plugin.PlayerInputHooks;
-        hooks.ZeroMovement = Dead || Movement.IsMoving;
-        hooks.DisableAllActions = Dead;
+        hooks.ZeroMovement = Dead || Movement.IsMoving || LimitBreakRecovery;
+        hooks.DisableAllActions = Dead || LimitBreakRecovery;
     }
 }
