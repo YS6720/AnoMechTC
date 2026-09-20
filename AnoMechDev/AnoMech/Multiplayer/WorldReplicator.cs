@@ -76,6 +76,8 @@ public sealed unsafe class WorldReplicator : IDisposable
         }
     }
 
+    public bool HasPendingEvents => eventBuffer.HasPendingEvents;
+
     public WorldSnapshotMessage CaptureWorld()
     {
         EnsureHost();

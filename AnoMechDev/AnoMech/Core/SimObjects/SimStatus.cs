@@ -12,6 +12,12 @@ public sealed unsafe class SimStatus : ISimObject
     private GameObjectId sourceObject;
     private float duration;
     private float elapsed;
+    // TC recording 20260911-200023-t968: Passage effect at 77.270,
+    // wing VFX at 77.895 (28 activations, median 0.626s). Keep the managed
+    // protection/cancellation immediate, but do not replace the startup with
+    // the status-owned native loop. Remaining time also ages late peer snapshots.
+    private const float PassageNativeOnsetRemaining = 18f - 0.625f;
+    private float nativeStartDelay;
 
     public ushort StatusId { get; }
     public PartyRole? SourceRole { get; }
@@ -38,13 +44,19 @@ public sealed unsafe class SimStatus : ISimObject
         NativeRemainingOverride = nativeRemainingOverride;
         IsActive = true;
         Stacks = stacks;
-        Statuses.AddStatusInit(
+        if (statusId == Combat.Jobs.Paladin.PassageOfArms && stacks != 0)
+            nativeStartDelay = MathF.Max(0f, RemainingTime - PassageNativeOnsetRemaining);
+        if (nativeStartDelay <= 0f)
+            StartNative();
+    }
+
+    private void StartNative()
+        => Statuses.AddStatusInit(
             (Character*)target.BattleCharaPtr,
-            statusId,
-            stacks,
+            StatusId,
+            Stacks,
             refreshDuration: NativeRemainingOverride ?? RemainingTime,
             sourceObject: sourceObject);
-    }
 
     public void Reapply(float duration, int stacks)
     {
@@ -73,6 +85,15 @@ public sealed unsafe class SimStatus : ISimObject
         elapsed = 0f;
         NativeRemainingOverride = nativeRemainingOverride;
         Stacks = param;
+        if (nativeStartDelay > 0f)
+        {
+            this.sourceObject = sourceObject;
+            nativeStartDelay = MathF.Min(nativeStartDelay,
+                MathF.Max(0f, RemainingTime - PassageNativeOnsetRemaining));
+            if (nativeStartDelay <= 0f)
+                StartNative();
+            return;
+        }
         Statuses.Apply(
             (Character*)target.BattleCharaPtr,
             StatusId,
@@ -96,6 +117,13 @@ public sealed unsafe class SimStatus : ISimObject
                 Despawn();
                 return;
             }
+        }
+        if (nativeStartDelay > 0f)
+        {
+            nativeStartDelay = MathF.Max(0f, nativeStartDelay - deltaSeconds);
+            if (nativeStartDelay > 0f)
+                return;
+            StartNative();
         }
 
         // 原生槽不見了＝遊戲自己取消了這個狀態（武裝戌守移動即取消、被打斷、玩家手動解除、

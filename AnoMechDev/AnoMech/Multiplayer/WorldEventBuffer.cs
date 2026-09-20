@@ -14,6 +14,8 @@ internal sealed class WorldEventBuffer
     private WorldSnapshotMessage? retirementSnapshot;
     private MpError? failure;
 
+    public bool HasPendingEvents => events.Count != 0;
+
     public void ObserveEnemy(EnemyState enemy)
     {
         EnsureHealthy();

@@ -32,6 +32,7 @@ public sealed class MultiplayerSession : IDisposable
     private double deadline;
     private double nextSnapshot;
     private double nextPoseSnapshot;
+    private bool abilityRolesDirty;
     // Change gating for pose traffic: send at PoseHz only while something moved, otherwise
     // fall back to a SnapshotHz keepalive so statuses/HP in the roles snapshot still land
     // within 50 ms and the receiver never waits on a sample that will not come.
@@ -189,8 +190,10 @@ public sealed class MultiplayerSession : IDisposable
                     return;
             }
             var worldDue = IsHost && now >= nextSnapshot;
+            var eventsDue = IsHost && game.HasPendingEvents;
+            var rolesDue = IsHost && (worldDue || abilityRolesDirty);
             var poseDue = now >= nextPoseSnapshot;
-            if (!worldDue && !poseDue)
+            if (!worldDue && !poseDue && !eventsDue && !rolesDue)
                 return;
             if (worldDue)
             {
@@ -198,13 +201,22 @@ public sealed class MultiplayerSession : IDisposable
                 nextSnapshot = nextSnapshot == 0
                     ? now + interval
                     : nextSnapshot + (Math.Floor((now - nextSnapshot) / interval) + 1) * interval;
-                // Creation state must still precede reliable cues and later retirement.
+            }
+            // A newly queued cue cannot wait for the 20Hz world deadline.
+            // Capture before draining: short-lived actors must cross the wire
+            // before their cues, with retirement strictly after those cues.
+            if (worldDue || eventsDue)
+            {
                 if (!Send(scope.RunId, game.CaptureWorld()))
                     return;
-                // 完整名冊（狀態列＋HP）只走 20 Hz。它同時是 60 Hz 輕量取樣的校正基準：
-                // 輕量取樣掉幾則最多讓某人慢 50 ms 歸位，不會讓任何狀態過期。
-                if (IsHost && !Send(scope.RunId, game.CaptureRoles()))
+            }
+            if (rolesDue)
+            {
+                // Accepted abilities publish their statuses in this frame,
+                // without shifting the regular countdown/HP cadence.
+                if (!Send(scope.RunId, game.CaptureRoles()))
                     return;
+                abilityRolesDirty = false;
             }
             if (poseDue)
             {
@@ -229,12 +241,15 @@ public sealed class MultiplayerSession : IDisposable
                         return;
                 }
             }
-            if (!worldDue)
-                return;
-            foreach (var item in game.DrainEvents())
-                if (!Send(scope.RunId, new WorldEventMessage(item)))
+            if (worldDue || eventsDue)
+            {
+                foreach (var item in game.DrainEvents())
+                    if (!Send(scope.RunId, new WorldEventMessage(item)))
+                        return;
+                if (game.TakeWorldAfterEvents() is { } retired && !Send(scope.RunId, retired))
                     return;
-            if (game.TakeWorldAfterEvents() is { } retired && !Send(scope.RunId, retired))
+            }
+            if (!worldDue)
                 return;
             // Result presentation keeps the world cadence; only character poses run faster.
             if (game.CaptureRunStatus() is { } status && status != lastRunStatus)
@@ -301,6 +316,7 @@ public sealed class MultiplayerSession : IDisposable
         // Reserve the id before invoking effects, including a rejected request.
         lastAbilityResults[(int)role] = new AbilityResultMessage(role, ability.ActionRequestId, false, false, null);
         var accepted = game.ApplyAbilityUse(role, ability, out var comboOk);
+        abilityRolesDirty |= accepted;
         var result = new AbilityResultMessage(role, ability.ActionRequestId, accepted,
             accepted && comboOk, game.CaptureJobResources(role));
         lastAbilityResults[(int)role] = result;
@@ -583,6 +599,7 @@ public sealed class MultiplayerSession : IDisposable
         preparedPeers.Clear();
         game.ResetAbilityState();
         Array.Clear(lastAbilityResults);
+        abilityRolesDirty = false;
         localPrepared = prepareSent = false;
         lastRunStatus = null;
         LastError = MpError.None;
@@ -786,6 +803,7 @@ public sealed class MultiplayerSession : IDisposable
         preparedPeers.Clear();
         game.ResetAbilityState();
         Array.Clear(lastAbilityResults);
+        abilityRolesDirty = false;
         LastError = reason;
         if (ownsNativeRun)
         {
@@ -840,6 +858,7 @@ public sealed class MultiplayerSession : IDisposable
         scope = default;
         game.ResetAbilityState();
         Array.Clear(lastAbilityResults);
+        abilityRolesDirty = false;
         // Abort network first; native cleanup cannot race a live queued dispatch.
         transport.Dispose();
         LastError = reason;

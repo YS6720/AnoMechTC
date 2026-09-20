@@ -14,7 +14,7 @@ namespace AnoMech.Core.SimObjects;
 //  - No extrapolation. The display never passes the newest sample, so a late or
 //    missing packet holds the character still instead of guessing a future pose.
 //  - Bounded lag. The display is at most InterpolationWindowSeconds behind the
-//    authoritative pose (25 ms; ~0.15 m for a 6 m/s run), and exactly that in
+//    authoritative pose (50 ms; ~0.3 m for a 6 m/s run), and exactly that in
 //    steady motion — the display speed matches the owner's speed with a fixed offset.
 //  - Snap, never chase, on discontinuities: first sample, teleport-sized jumps,
 //    KO/revive and explicit host teleports all reset the display so nothing
@@ -24,15 +24,11 @@ internal struct NetworkPoseSmoother
     // Follow the character cadence, not the slower complete-world snapshots.
     public const float SnapshotIntervalSeconds = 1f / MpLimits.PoseHz;
 
-    // 視窗＝能容忍的到達抖動。原本 3 個取樣（25 ms）：只要連續三個 pose 晚到，
-    // 顯示就停住，玩家看到的是「別人偶爾頓一下」。經 Cloudflare Tunnel 的連線抖動
-    // 本來就比區網大，2026-09-15 維護者回報偶發嚴重卡頓。
-    //
-    // 放寬到 6 個取樣（50 ms）：抖動容忍加倍，代價是顯示固定落後 50 ms（跑動 6 m/s
-    // 約 0.3 m）。機制判定不受影響——判定讀最新的原始取樣，不是這裡的顯示值。
-    // 再往上加沒有意義：落後超過一個 GCD 的位置對練機制反而有害。
-    // 仍然不外插：晚到就停住，絕不猜未來位置（猜錯會橡皮筋，比頓一下更糟）。
-    public const float InterpolationWindowSeconds = 6f * SnapshotIntervalSeconds;
+    // Keep the 50ms jitter window independent of sender cadence: six samples
+    // meant 50ms at 120Hz, but silently doubled display lag when PoseHz became
+    // 60. Mechanics still read the latest owner pose; missing packets never
+    // extrapolate beyond it.
+    public const float InterpolationWindowSeconds = 0.05f;
 
     // A 2 m jump in one character sample is not ordinary locomotion. Snap instead
     // of drawing a streak across the arena.

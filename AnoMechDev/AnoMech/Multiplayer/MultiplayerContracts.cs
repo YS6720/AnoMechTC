@@ -84,6 +84,7 @@ public interface IMultiplayerGame
     RolesSnapshotMessage CaptureRoles();
     /// <summary>60 Hz 的輕量取樣（位置／朝向／生死／動畫），不含狀態列與 HP。</summary>
     RolePoseState[] CapturePoses();
+    bool HasPendingEvents { get; }
     IReadOnlyList<WorldEvent> DrainEvents();
     RunStatusMessage CaptureRunStatus();
     WorldSnapshotMessage? TakeWorldAfterEvents();

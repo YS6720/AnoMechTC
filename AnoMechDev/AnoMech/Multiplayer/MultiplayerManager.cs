@@ -515,6 +515,7 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
     public RolePoseState[] CapturePoses() => Replicator.CapturePoses();
     public RolesSnapshotMessage CaptureRoles()
         => Replicator.CaptureRoles() with { LimitBreak = game.World.LimitBreaks?.CaptureState() };
+    public bool HasPendingEvents => Replicator.HasPendingEvents;
     public IReadOnlyList<WorldEvent> DrainEvents() => Replicator.DrainEvents();
     public WorldSnapshotMessage? TakeWorldAfterEvents() => Replicator.TakeWorldAfterEvents();
     public void ApplyWorld(WorldSnapshotMessage snapshot, long ackedMarkerRequest) => Replicator.ApplyWorld(snapshot, ackedMarkerRequest);
