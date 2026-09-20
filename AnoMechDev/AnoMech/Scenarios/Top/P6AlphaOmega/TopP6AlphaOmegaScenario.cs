@@ -299,6 +299,12 @@ public sealed partial class TopP6AlphaOmegaScenario : IProgressScenario
                 HitTarget(farthest, ActionId.Unknown7ddf, false, 0, true, farthestHelper);
             });
         }
+        // The schedules are chronological; retain both sources through the last hit's effect tail.
+        world.Events.Add(offset + attacks[^1].Hit + 2f, () =>
+        {
+            firstHelper?.Despawn();
+            farthestHelper?.Despawn();
+        });
     }
 
     private void ScheduleCosmoDive(float beginAt = 29.592f, bool includeFollowUpAutos = false)

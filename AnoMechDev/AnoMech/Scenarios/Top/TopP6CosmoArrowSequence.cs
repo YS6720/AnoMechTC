@@ -33,6 +33,7 @@ internal static class TopP6CosmoArrowSequence
                 world.Events.Add(delay + (isEarly ? 9.90f : 11.91f), () =>
                     damage.Resolve(helper, ActionId.CosmoArrowOmen, [DamageType.Lethal], []));
 
+            var lastHitAt = delay + (isEarly ? 9.90f : 11.91f);
             var waves = Init(early, initial, []);
             for (var pulse = 0; pulse < 7; pulse++)
             {
@@ -44,6 +45,7 @@ internal static class TopP6CosmoArrowSequence
                         ? new Placement(new(-20f, 0f, line), MathF.PI / 2)
                         : new Placement(new(line, 0f, -20f), 0f);
                     var delta = delay + pulse * 2f;
+                    lastHitAt = 11.91f + delta;
                     world.Events.Add(11.82f + delta, () => helper?.SetPosition(next));
                     world.Events.Add(11.91f + delta, () => helper?.Cast(ActionId.CosmoArrowDamage, castSeconds: 0f));
                     world.Events.Add(11.91f + delta, () =>
@@ -51,6 +53,9 @@ internal static class TopP6CosmoArrowSequence
                 }
                 waves = pulse == 0 ? Init(early, initial, waves) : Progress(waves);
             }
+            // Keep the source through its final release, then allow the same
+            // two-second effect tail as the other P6 helpers before retiring it.
+            world.Events.Add(lastHitAt + 2f, () => helper?.Despawn());
         }
     }
 }
