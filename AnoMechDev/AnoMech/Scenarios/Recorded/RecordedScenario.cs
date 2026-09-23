@@ -168,6 +168,18 @@ public partial class RecordedScenario : IScenario
     /// </summary>
     protected virtual (float t, ushort state, ushort flags, byte index)[] MapEffectSequence => [];
 
+    /// <summary>
+    /// 多人 peer 的 MapEffect 允許清單：錄影原樣（<c>mapeffect</c> 事件）＋手寫進場序列，
+    /// 與 ScheduleMapEffects／ScheduleDirectorSequence 實際會送出的完全相同。
+    /// </summary>
+    internal IEnumerable<(uint PacketFlags, byte Index)> RecordedNetworkMapEffects(RecordedTimeline timeline)
+        => timeline.Of("mapeffect").Select(e => (((uint)e.State << 16) | e.Flags, e.Index))
+            .Concat(MapEffectSequence.Select(s => (((uint)s.state << 16) | s.flags, s.index)));
+
+    /// <summary>多人 peer 的 DirectorUpdate 允許清單＝<see cref="DirectorSequence"/>（arg3／arg4 恆為 0）。</summary>
+    internal IEnumerable<(uint Category, uint Arg1, uint Arg2, uint Arg3, uint Arg4)> RecordedNetworkDirectorUpdates
+        => DirectorSequence.Select(d => (d.cmd, d.a1, d.a2, 0u, 0u));
+
     /// <summary>階段天氣（null＝不動，改用資料裡的 weather 事件）。</summary>
     protected virtual byte? WeatherOverride => null;
 

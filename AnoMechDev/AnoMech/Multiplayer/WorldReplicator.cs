@@ -54,6 +54,10 @@ public sealed unsafe class WorldReplicator : IDisposable
     private bool capturingEvent;
     private int nextNetId = 1;
     private bool disposed;
+    // Undeclared map effects / director updates are skipped, not fatal: they are
+    // visuals, so a missed declaration costs one effect on peers instead of the run.
+    // Each distinct one is logged once per run so the gap stays visible.
+    private readonly HashSet<string> reportedUndeclared = [];
 
     public WorldReplicator(Game game, NetworkResourceCatalog resources, bool host,
         PartyRole localRole, Func<bool> isCurrent)
@@ -448,9 +452,11 @@ public sealed unsafe class WorldReplicator : IDisposable
                 NativeCall(() => ResolveActor(e.Actor).RemoveVfx(ResolveActorVfx(e.ResourceKey)));
                 break;
             case MapEffectEvent e:
+                if (SkipUndeclared(e)) break;
                 NativeCall(() => world.Map.AddEffect(e.Flags, e.Index));
                 break;
             case DirectorEvent e:
+                if (SkipUndeclared(e)) break;
                 NativeCall(() => world.Map.DirectorUpdate(e.Category, e.Arg1, e.Arg2, e.Arg3, e.Arg4));
                 break;
             case WeatherEvent e:
@@ -900,6 +906,28 @@ public sealed unsafe class WorldReplicator : IDisposable
     private static bool IsNullObject(GameObjectId id)
         => id.ObjectId == 0 || id.ObjectId == 0xE0000000;
 
+    // True when the event is a map effect / director update the approved scene did not
+    // declare. Peers never pass such values to native; the run itself continues.
+    private bool SkipUndeclared(WorldEvent value)
+    {
+        var description = value switch
+        {
+            MapEffectEvent e when !resources.HasMapEffect(e.Flags, e.Index)
+                => $"MapEffect flags=0x{e.Flags:X8} index={e.Index}",
+            DirectorEvent e when !resources.HasDirectorUpdate(e.Category, e.Arg1, e.Arg2, e.Arg3, e.Arg4)
+                => $"DirectorUpdate 0x{e.Category:X8}({e.Arg1},{e.Arg2},{e.Arg3},{e.Arg4})",
+            _ => null,
+        };
+        if (description is null) return false;
+        if (reportedUndeclared.Add(description))
+        {
+            var message = $"[Multiplayer] 略過場景未宣告的 {description}（{(host ? "主機不轉送" : "成員不套用")}）";
+            Plugin.Log.Warning(message);
+            CrashTrace.Log(message);
+        }
+        return true;
+    }
+
     private void OnNetworkControl(WorldEvent value)
         => OnNetworkEvent(new SimNetworkWorldEvent(null, value));
 
@@ -910,6 +938,9 @@ public sealed unsafe class WorldReplicator : IDisposable
         {
             EnsureHost();
             EnsureCurrent();
+            // The host already shows the effect locally; it just is not forwarded.
+            if (item is SimNetworkWorldEvent { Event: var emitted } && SkipUndeclared(emitted))
+                return;
             var translated = item switch
             {
                 SimNetworkWorldEvent worldEvent => TranslateWorldEvent(worldEvent),

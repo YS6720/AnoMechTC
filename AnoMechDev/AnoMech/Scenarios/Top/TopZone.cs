@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using AnoMech.Core.Game;
 using AnoMech.Core.SimObjects;
@@ -26,6 +27,12 @@ public sealed class TopZone : IZone
     public IReadOnlyList<WaymarkLayout> WaymarkPresets { get; } =
         [new WaymarkLayout("Ring", TopUtils.TopWaymarks)];
 
+    // Server MapEffect arena setup: hide the eight eyes, then show the death wall.
+    private static readonly (uint PacketFlags, byte Index)[] ArenaSetup =
+        [.. Enumerable.Range(1, 8).Select(i => (0x00040004u, (byte)i)), (0x00020002u, (byte)0x00)];
+
+    public IEnumerable<(uint PacketFlags, byte Index)> NetworkMapEffects => ArenaSetup;
+
     public void Run(SimWorld world)
     {
         world.EnforceArenaBoundary(Geometry.ArenaRadius);
@@ -33,10 +40,9 @@ public sealed class TopZone : IZone
         world.Events.Add(1f, () => InitTopArena(world));
     }
     
-    private void InitTopArena(SimWorld world)
+    private static void InitTopArena(SimWorld world)
     {
-        for (byte i = 1; i <= 8; i++)
-            world.Map.AddEffect(0x00040004, i); // hide eyes
-        world.Map.AddEffect(0x00020002, 0x00); // show death wall
+        foreach (var (packetFlags, index) in ArenaSetup)
+            world.Map.AddEffect(packetFlags, index);
     }
 }

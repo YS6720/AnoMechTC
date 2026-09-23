@@ -27,6 +27,10 @@ public interface IScenario
     // Peers use the same approved build/scene; legacy scenarios retain progress 1.
     byte TetherProgress => 1;
 
+    // Every MapEffect this scenario emits, beyond its zone's. Peers apply nothing else
+    // (see IZone.NetworkMapEffects); an effect missing here fails the multiplayer run.
+    IEnumerable<(uint PacketFlags, byte Index)> NetworkMapEffects => [];
+
     // Selectable strats. Run's selectedAi indexes this (null = solo); region buttons derive
     // from each strat's IScenarioAi.Group.
     IReadOnlyList<IScenarioAi> AiStrats { get; }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using AnoMech.Core.Game;
 using AnoMech.Core.Game.Ai;
@@ -22,6 +23,13 @@ public sealed class TopP2PartySynergyScenario : IScenario
     private readonly TopP2PartySynergySettingsWindow settingsWindow = new();
 
     public IReadOnlyList<IScenarioAi> AiStrats => [new TopP2PartySynergyAi(), new TopP2PartySynergyTwLineAi()];
+
+    // Eye appear / charge / fire / despawn at the new-north octant (effect slots 1..8).
+    private static readonly uint[] InstanceEffectFlags = [0x00020002U, 0x00800040U, 0x10000001U, 0x00080008U];
+    public IEnumerable<(uint PacketFlags, byte Index)> NetworkMapEffects =>
+        from direction in Direction.All
+        from packetFlags in InstanceEffectFlags
+        select (packetFlags, (byte)(direction.Index() + 1));
 
     private SimWorld world = null!;
     private SimParty party = null!;
@@ -65,10 +73,10 @@ public sealed class TopP2PartySynergyScenario : IScenario
     private void Run_InstanceEvents()
     {
         var index = (byte)(state.NewNorthA.Index() + 1);
-        world.Events.Add(7.93f, () => world.Map.AddEffect(packetFlags: 0x00020002U, index: index));
-        world.Events.Add(17.95f, () => world.Map.AddEffect(packetFlags: 0x00800040U, index: index));
-        world.Events.Add(20.67f, () => world.Map.AddEffect(packetFlags: 0x10000001U, index: index));
-        world.Events.Add(26.82f, () => world.Map.AddEffect(packetFlags: 0x00080008U, index: index));
+        world.Events.Add(7.93f, () => world.Map.AddEffect(packetFlags: InstanceEffectFlags[0], index: index));
+        world.Events.Add(17.95f, () => world.Map.AddEffect(packetFlags: InstanceEffectFlags[1], index: index));
+        world.Events.Add(20.67f, () => world.Map.AddEffect(packetFlags: InstanceEffectFlags[2], index: index));
+        world.Events.Add(26.82f, () => world.Map.AddEffect(packetFlags: InstanceEffectFlags[3], index: index));
     }
 
     private void Run_PlayerTethers(bool solo)

@@ -22,6 +22,13 @@ public sealed class TopP5DeltaScenario : IScenario
 
     public IReadOnlyList<IScenarioAi> AiStrats => [new TopP5DeltaAi(), new TopP5DeltaMoogleAi()];
 
+    // Eye spawn / charge start / charge done / despawn at the north or south eye slot.
+    private static readonly uint[] EyeEffectFlags = [0x00000002, 0x00800040, 0x10000001, 0x00000008];
+    public IEnumerable<(uint PacketFlags, byte Index)> NetworkMapEffects =>
+        from side in new[] { NorthSouth.North, NorthSouth.South }
+        from packetFlags in EyeEffectFlags
+        select (packetFlags, side.EffectIndex);
+
     private TopUtils topUtils = null!;
 
     private TopP5DeltaState state = null!;
@@ -612,8 +619,8 @@ public sealed class TopP5DeltaScenario : IScenario
 
     // Delta arena transition animation (index 0x07).
     // Real game fires at +8/+24/+27/+42s relative to "Run: mi (Delta Version)" cast.
-    private void EyeSpawn() => world.Map.AddEffect(0x00000002, state.EyeSpawn.EffectIndex);
-    private void EyeStartCharging()  => world.Map.AddEffect(0x00800040, state.EyeSpawn.EffectIndex);
-    private void EyeDoneCharging()  => world.Map.AddEffect(0x10000001, state.EyeSpawn.EffectIndex);
-    private void EyeDespawn()    => world.Map.AddEffect(0x00000008, state.EyeSpawn.EffectIndex);
+    private void EyeSpawn() => world.Map.AddEffect(EyeEffectFlags[0], state.EyeSpawn.EffectIndex);
+    private void EyeStartCharging()  => world.Map.AddEffect(EyeEffectFlags[1], state.EyeSpawn.EffectIndex);
+    private void EyeDoneCharging()  => world.Map.AddEffect(EyeEffectFlags[2], state.EyeSpawn.EffectIndex);
+    private void EyeDespawn()    => world.Map.AddEffect(EyeEffectFlags[3], state.EyeSpawn.EffectIndex);
 }

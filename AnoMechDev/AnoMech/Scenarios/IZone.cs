@@ -27,6 +27,11 @@ public interface IZone
     // Scenario-local positions whose BG SharedGroup colliders are dropped at start.
     IReadOnlyList<Vector3> ColliderRemovalPoints => Array.Empty<Vector3>();
 
+    // Every MapEffect this zone's own Run emits (packetFlags: high16=State, low8=Flags).
+    // Multiplayer peers apply only effects the approved scene declares; an undeclared
+    // effect aborts the run instead of reaching native ProcessMapEffect.
+    IEnumerable<(uint PacketFlags, byte Index)> NetworkMapEffects => [];
+
     // Zone-wide setup, first in the cascade. Default no-op.
     void Run(SimWorld world) { }
 }

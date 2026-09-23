@@ -37,12 +37,17 @@ public sealed class NetworkResourceCatalog
     private readonly HashSet<uint> timelineIds = [];
     private readonly HashSet<uint> tetherIds = [];
     private readonly HashSet<uint> weatherIds = [];
+    // Host-driven native world commands. Unlike rows and files these have no game
+    // table to check against, so the approved scene's own declarations are the list.
+    private readonly HashSet<(uint PacketFlags, byte Index)> mapEffects = [];
+    private readonly HashSet<(uint Category, uint Arg1, uint Arg2, uint Arg3, uint Arg4)> directorUpdates = [];
 
     private NetworkResourceCatalog(IScenario scenario, RecordedTimeline? timeline)
     {
         Scenario = scenario;
         BuildCodeVisualCatalog();
         BuildRecordedVisualCatalog(scenario, timeline);
+        BuildWorldCommandCatalog(scenario, timeline);
         LoadRuntimeRows();
         Fingerprint = BuildFingerprint();
     }
@@ -141,6 +146,20 @@ public sealed class NetworkResourceCatalog
     public bool HasTimeline(uint id) => id == 0 || timelineIds.Contains(id);
     public bool HasTether(uint id) => id != 0 && tetherIds.Contains(id);
     public bool HasWeather(uint id) => weatherIds.Contains(id);
+    public bool HasMapEffect(uint packetFlags, byte index) => mapEffects.Contains((packetFlags, index));
+    public bool HasDirectorUpdate(uint category, uint arg1, uint arg2, uint arg3, uint arg4)
+        => directorUpdates.Contains((category, arg1, arg2, arg3, arg4));
+
+    private void BuildWorldCommandCatalog(IScenario scenario, RecordedTimeline? timeline)
+    {
+        mapEffects.UnionWith(scenario.Phase.Zone.NetworkMapEffects);
+        mapEffects.UnionWith(scenario.NetworkMapEffects);
+        if (scenario is RecordedScenario recorded && timeline is not null)
+        {
+            mapEffects.UnionWith(recorded.RecordedNetworkMapEffects(timeline));
+            directorUpdates.UnionWith(recorded.RecordedNetworkDirectorUpdates);
+        }
+    }
 
     private void BuildRecordedVisualCatalog(IScenario scenario, RecordedTimeline? timeline)
     {
@@ -258,6 +277,8 @@ public sealed class NetworkResourceCatalog
         lines.AddRange(timelineIds.Select(id => $"timeline:{id}"));
         lines.AddRange(tetherIds.Select(id => $"tether:{id}"));
         lines.AddRange(weatherIds.Select(id => $"weather:{id}"));
+        lines.AddRange(mapEffects.Select(e => $"map-effect:{e.PacketFlags:x8}:{e.Index}"));
+        lines.AddRange(directorUpdates.Select(d => $"director:{d.Category:x8}:{d.Arg1}:{d.Arg2}:{d.Arg3}:{d.Arg4}"));
         lines.Sort(StringComparer.Ordinal);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", lines)))).ToLowerInvariant();
     }
