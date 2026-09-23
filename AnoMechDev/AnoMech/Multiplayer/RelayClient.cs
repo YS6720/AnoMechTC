@@ -18,19 +18,24 @@ namespace AnoMech.Multiplayer;
 /// </summary>
 public sealed class RelayClient : IRelayTransport
 {
-    private sealed record OutboundFrame(byte[] Bytes, bool LatestState, StateKey? Key);
     private readonly record struct StateKey(Guid SenderId, Guid RunId, Type MessageType);
 
     private readonly object stateLock = new();
     private readonly object sendLock = new();
     private readonly object receiveLock = new();
-    private readonly LinkedList<OutboundFrame> sendQueue = new();
-    private readonly Dictionary<StateKey, LinkedListNode<OutboundFrame>> sendStates = new();
+    // Both queues shed (drop cosmetic cues and superseded samples) exactly where the old bounded
+    // queues refused and the connection closed itself; see DeliveryQueue. Only a Required backlog
+    // reaching QueueHardLimit still ends the connection.
+    private readonly DeliveryQueue<byte[], StateKey> sendQueue = new(MpLimits.SendQueue, MpLimits.QueueHardLimit);
     private readonly SemaphoreSlim sendSignal = new(0);
-    private readonly LinkedList<RelayEvent> receiveQueue = new();
-    private readonly Dictionary<StateKey, LinkedListNode<RelayEvent>> receiveStates = new();
+    private readonly DeliveryQueue<RelayEvent, StateKey> receiveQueue = new(MpLimits.ReceiveQueue, MpLimits.QueueHardLimit);
     private readonly Dictionary<Guid, long> lastIncomingSequences = new();
     private readonly HashSet<Guid> retiredRuns = new();
+    // Receive scratch, reused for every frame: the receive side (handshake, then the single
+    // receive loop) is strictly sequential, and every returned payload is a fresh copy. A new
+    // 16 KiB buffer per message was the largest allocation source on a busy host (~420 msg/s
+    // from seven peers, plus the embedded relay in the same game process).
+    private readonly byte[] receiveBuffer = new byte[16 * 1024];
 
     private ClientWebSocket? socket;
     private CancellationTokenSource? lifetime;
@@ -49,23 +54,34 @@ public sealed class RelayClient : IRelayTransport
     private long membershipGeneration;
     private Guid currentRunId;
     private long lastInboundTimestamp;
-    private readonly Queue<long> outboundMessageTimes = new();
+    // Send loop only: when the frames written in the last second (heartbeats included) reach the
+    // relay's per-sender budget, the loop waits for the window instead of failing the message.
+    private readonly Queue<long> sentFrameTimes = new();
     // Health readout only (see RelayTransportStats).  Heartbeat RTT is measured from the
     // moment the heartbeat is queued, so a stalled send loop inflates it on purpose.
     private long heartbeatSentTimestamp;
     private double rttMilliseconds = -1;
-    private long skippedLatestState;
+    // Latest-state / cosmetic items dropped at the hard limit (health readout, with queue sheds).
+    private long droppedAtLimit;
+    // Diagnostic only (IRelayTransport.LastSendFailure): why the last TrySend refused, and the
+    // first terminal error, so a send on an already-closed socket names what closed it.
+    // lastSendFailure is written and read by the TrySend caller; closeError under stateLock.
+    private MpError lastSendFailure;
+    private MpError? closeError;
+
+    public MpError LastSendFailure => lastSendFailure;
 
     public RelayTransportStats Stats
     {
         get
         {
             int send, receive;
-            lock (sendLock) send = sendQueue.Count;
-            lock (receiveLock) receive = receiveQueue.Count;
+            long shed;
+            lock (sendLock) { send = sendQueue.Count; shed = sendQueue.Shed; }
+            lock (receiveLock) { receive = receiveQueue.Count; shed += receiveQueue.Shed; }
             double rtt;
             lock (stateLock) rtt = rttMilliseconds;
-            return new RelayTransportStats(rtt, send, receive, Interlocked.Read(ref skippedLatestState));
+            return new RelayTransportStats(rtt, send, receive, shed + Interlocked.Read(ref droppedAtLimit));
         }
     }
 
@@ -138,7 +154,7 @@ public sealed class RelayClient : IRelayTransport
             await client.ConnectAsync(endpoint, connectCts.Token).ConfigureAwait(false);
             var nonce = WireProtocol.CreateClientNonce();
             await SendDirectAsync(client, WireProtocol.EncodeHandshakeRequest(nonce), connectCts.Token).ConfigureAwait(false);
-            var handshake = await ReceiveHandshakeAsync(client, connectCts.Token).ConfigureAwait(false);
+            var handshake = await ReceiveMessageAsync(client, receiveBuffer, timeIdle: true, connectCts.Token).ConfigureAwait(false);
             if (!WireProtocol.TryDecodeHandshakeResponse(handshake.Bytes, out var response) ||
                 response.ClientNonce != nonce || !WireProtocol.HasExactCapabilities(response.Capabilities) ||
                 response.RoomId == Guid.Empty || response.PeerId == Guid.Empty || response.HostId == Guid.Empty ||
@@ -218,64 +234,64 @@ public sealed class RelayClient : IRelayTransport
     {
         if (message is null || !WireProtocol.IsValidPacketShape(new ClientPacket(
                 MpLimits.ProtocolVersion, 1, runId, message)))
-            return false;
+            return Refuse(MpError.InvalidMessage);
 
         try
         {
             if (!MpValidation.Validate(message))
-                return false;
+                return Refuse(MpError.InvalidMessage);
         }
         catch
         {
-            return false;
+            return Refuse(MpError.InvalidMessage);
         }
 
         RelayIdentity? local;
         lock (stateLock)
         {
             if (disposed || status != RelayStatus.Connected || identity is null || lifetime is null)
-                return false;
+                return Refuse(closeError ?? MpError.TransportFailure);
             local = identity;
             if (local.IsHost != (message is IHostMessage))
-                return false;
+                return Refuse(MpError.InvalidMessage);
             if (message is not IHostMessage && message is not IPeerMessage)
-                return false;
+                return Refuse(MpError.InvalidMessage);
             if (!ValidateRunTransitionForSend(runId, message))
-                return false;
+                return Refuse(MpError.InvalidMessage);
         }
 
         try
         {
             MpError? failure = null;
             var signal = false;
-            // A latest-state sample (pose / roles / world) is superseded by the next one, so
-            // rate or queue pressure just skips this sample instead of closing the room.
-            // Reliable messages keep failing hard: dropping one would desync the run.
-            var latest = message is ILatestState;
+            // The send loop paces the rate and the queue sheds under pressure (DeliveryQueue), so a
+            // burst no longer closes the room. Only a Required backlog at the hard limit still fails:
+            // dropping a lifecycle or stateful message would desync the run.
+            var deliveryClass = MpDelivery.Classify(message);
             lock (sendLock)
             {
-                if (!AcceptOutboundRateLocked())
+                var sequence = ++nextSequence;
+                var packet = new ClientPacket(MpLimits.ProtocolVersion, sequence, runId, message);
+                var bytes = WireProtocol.EncodeClientPacket(packet);
+                var key = deliveryClass == DeliveryClass.LatestState
+                    ? new StateKey(local!.PeerId, runId, message.GetType()) : (StateKey?)null;
+                switch (sendQueue.Enqueue(bytes, deliveryClass, key, out _))
                 {
-                    if (latest) { Interlocked.Increment(ref skippedLatestState); return true; }
-                    failure = MpError.RateLimit;
-                }
-                else
-                {
-                    var sequence = ++nextSequence;
-                    var packet = new ClientPacket(MpLimits.ProtocolVersion, sequence, runId, message);
-                    var bytes = WireProtocol.EncodeClientPacket(packet);
-                    var key = latest ? new StateKey(local!.PeerId, runId, message.GetType()) : (StateKey?)null;
-                    if (!EnqueueSendLocked(new OutboundFrame(bytes, latest, key), out signal))
-                    {
-                        if (latest) { Interlocked.Increment(ref skippedLatestState); return true; }
+                    case DeliveryResult.Accepted:
+                        signal = true;
+                        break;
+                    case DeliveryResult.Overflow when deliveryClass != DeliveryClass.Required:
+                        Interlocked.Increment(ref droppedAtLimit);
+                        return true;
+                    case DeliveryResult.Overflow:
                         failure = MpError.QueueOverflow;
-                    }
+                        break;
                 }
             }
             if (failure is { } error)
             {
                 Complete(error);
-                return false;
+                return Refuse(error);
             }
             if (message is EndRunMessage)
             {
@@ -292,48 +308,46 @@ public sealed class RelayClient : IRelayTransport
         catch (InvalidDataException)
         {
             Complete(MpError.InvalidMessage);
-            return false;
+            return Refuse(MpError.InvalidMessage);
         }
         catch (ObjectDisposedException)
         {
-            return false;
+            return Refuse(MpError.Disposed);
         }
         catch (ArgumentException)
         {
             Complete(MpError.InvalidMessage);
-            return false;
+            return Refuse(MpError.InvalidMessage);
         }
         catch (InvalidOperationException)
         {
             Complete(MpError.InvalidMessage);
-            return false;
+            return Refuse(MpError.InvalidMessage);
         }
         catch (NotSupportedException)
         {
             Complete(MpError.InvalidMessage);
-            return false;
+            return Refuse(MpError.InvalidMessage);
         }
+    }
+
+    private bool Refuse(MpError reason)
+    {
+        lastSendFailure = reason;
+        return false;
     }
 
     public bool TryReceive(out RelayEvent? item)
     {
         lock (receiveLock)
         {
-            if (receiveQueue.First is not { } node)
+            if (receiveQueue.TryDequeue(out var next))
             {
-                item = null;
-                return false;
+                item = next;
+                return true;
             }
-            receiveQueue.RemoveFirst();
-            if (node.Value is RelayReceived received && received.Packet.Message is ILatestState)
-            {
-                var key = new StateKey(received.Packet.SenderId, received.Packet.RunId,
-                    received.Packet.Message.GetType());
-                if (receiveStates.TryGetValue(key, out var stateNode) && ReferenceEquals(stateNode, node))
-                    receiveStates.Remove(key);
-            }
-            item = node.Value;
-            return true;
+            item = null;
+            return false;
         }
     }
 
@@ -423,28 +437,36 @@ public sealed class RelayClient : IRelayTransport
         while (!token.IsCancellationRequested)
         {
             await sendSignal.WaitAsync(token).ConfigureAwait(false);
-            OutboundFrame? frame;
+            // Wait for rate room before taking the frame, so a newer sample can still replace it.
+            await PaceAsync(token).ConfigureAwait(false);
+            byte[]? frame;
             lock (sendLock)
-            {
-                if (sendQueue.First is not { } node)
-                {
-                    frame = null;
-                }
-                else
-                {
-                    frame = node.Value;
-                    sendQueue.RemoveFirst();
-                    if (frame.Key is { } key && sendStates.TryGetValue(key, out var mapped) &&
-                        ReferenceEquals(mapped, node))
-                        sendStates.Remove(key);
-                }
-            }
+                frame = sendQueue.TryDequeue(out var next) ? next : null;
             if (frame is null)
                 continue;
+            sentFrameTimes.Enqueue(Stopwatch.GetTimestamp());
             using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-            sendCts.CancelAfter(TimeSpan.FromSeconds(MpLimits.IoTimeoutSeconds));
-            await socket!.SendAsync(frame.Bytes, WebSocketMessageType.Text, true, sendCts.Token)
+            // Same tolerance as liveness: a write that cannot progress for LivenessSeconds is a dead link.
+            sendCts.CancelAfter(TimeSpan.FromSeconds(MpLimits.LivenessSeconds));
+            await socket!.SendAsync(frame, WebSocketMessageType.Text, true, sendCts.Token)
                 .ConfigureAwait(false);
+        }
+    }
+
+    // At most MessagesPerSenderSecond frames (heartbeats included) in any one-second window, the
+    // relay's per-sender budget. Before 2026-09-23 a reliable message over this limit closed the
+    // room itself (RateLimit); now the burst waits here. Normal traffic (~100-140/s) never waits.
+    private async Task PaceAsync(CancellationToken token)
+    {
+        while (true)
+        {
+            while (sentFrameTimes.Count > 0 && Stopwatch.GetElapsedTime(sentFrameTimes.Peek()).TotalSeconds >= 1)
+                sentFrameTimes.Dequeue();
+            if (sentFrameTimes.Count < MpLimits.MessagesPerSenderSecond)
+                return;
+            var wait = TimeSpan.FromSeconds(1) - Stopwatch.GetElapsedTime(sentFrameTimes.Peek());
+            if (wait > TimeSpan.Zero)
+                await Task.Delay(wait, token).ConfigureAwait(false);
         }
     }
 
@@ -452,7 +474,7 @@ public sealed class RelayClient : IRelayTransport
     {
         while (!token.IsCancellationRequested)
         {
-            var received = await ReceiveMessageAsync(socket!, token).ConfigureAwait(false);
+            var received = await ReceiveMessageAsync(socket!, receiveBuffer, timeIdle: false, token).ConfigureAwait(false);
             lock (stateLock)
                 lastInboundTimestamp = Stopwatch.GetTimestamp();
             if (received.MessageType == WebSocketMessageType.Close)
@@ -487,7 +509,7 @@ public sealed class RelayClient : IRelayTransport
                 if (control.Kind == RelayControlKind.PeerJoined)
                 {
                     Interlocked.Increment(ref membershipGeneration);
-                    if (!EnqueueReceive(new RelayPeerJoined(control.PeerId), latestState: false, key: null))
+                    if (!EnqueueReceive(new RelayPeerJoined(control.PeerId), DeliveryClass.Required, key: null))
                     {
                         Complete(MpError.QueueOverflow);
                         return;
@@ -496,7 +518,7 @@ public sealed class RelayClient : IRelayTransport
                 else if (control.Kind == RelayControlKind.PeerLeft)
                 {
                     Interlocked.Increment(ref membershipGeneration);
-                    if (!EnqueueReceive(new RelayPeerLeft(control.PeerId), latestState: false, key: null))
+                    if (!EnqueueReceive(new RelayPeerLeft(control.PeerId), DeliveryClass.Required, key: null))
                     {
                         Complete(MpError.QueueOverflow);
                         return;
@@ -521,9 +543,10 @@ public sealed class RelayClient : IRelayTransport
                 continue;
 
             var isEnd = packet.Message is EndRunMessage;
-            var state = packet.Message is ILatestState;
-            var stateKey = state ? new StateKey(packet.SenderId, packet.RunId, packet.Message.GetType()) : (StateKey?)null;
-            if (!EnqueueReceive(new RelayReceived(packet), state, stateKey))
+            var deliveryClass = MpDelivery.Classify(packet.Message);
+            var stateKey = deliveryClass == DeliveryClass.LatestState
+                ? new StateKey(packet.SenderId, packet.RunId, packet.Message.GetType()) : (StateKey?)null;
+            if (!EnqueueReceive(new RelayReceived(packet), deliveryClass, stateKey))
             {
                 Complete(MpError.QueueOverflow);
                 return;
@@ -554,7 +577,6 @@ public sealed class RelayClient : IRelayTransport
                 return;
             }
 
-            var queued = false;
             lock (sendLock)
             {
                 if (disposed || Status != RelayStatus.Connected)
@@ -563,14 +585,10 @@ public sealed class RelayClient : IRelayTransport
                 var bytes = WireProtocol.EncodeControl(Guid.Empty, RelayControlKind.Heartbeat, Guid.Empty, sequence);
                 var key = new StateKey(Guid.Empty, Guid.Empty, typeof(RelayControlKind));
                 lock (stateLock) heartbeatSentTimestamp = Stopwatch.GetTimestamp();
-                queued = EnqueueSendLocked(new OutboundFrame(bytes, true, key), out var shouldSignal);
-                if (shouldSignal)
+                // A heartbeat that finds the queue at its hard limit is skipped, not fatal: liveness
+                // (ours and the relay's) decides whether this connection is still alive.
+                if (sendQueue.Enqueue(bytes, DeliveryClass.LatestState, key, out _) == DeliveryResult.Accepted)
                     sendSignal.Release();
-            }
-            if (!queued)
-            {
-                Complete(MpError.QueueOverflow);
-                return;
             }
         }
     }
@@ -685,59 +703,17 @@ public sealed class RelayClient : IRelayTransport
         }
         return runId == Guid.Empty;
     }
-    private bool AcceptOutboundRateLocked()
-    {
-        // Only accepted messages occupy the window: a skipped pose sample must not keep the
-        // sender pinned at the limit for the rest of the second.
-        while (outboundMessageTimes.Count > 0 &&
-               Stopwatch.GetElapsedTime(outboundMessageTimes.Peek()).TotalSeconds > 1)
-            outboundMessageTimes.Dequeue();
-        if (outboundMessageTimes.Count >= MpLimits.MessagesPerSenderSecond)
-            return false;
-        outboundMessageTimes.Enqueue(Stopwatch.GetTimestamp());
-        return true;
-    }
-    private bool EnqueueSendLocked(OutboundFrame frame, out bool shouldSignal)
-    {
-        shouldSignal = false;
-        if (frame.LatestState && frame.Key is { } key && sendStates.TryGetValue(key, out var existing))
-        {
-            existing.Value = frame;
-            sendQueue.Remove(existing);
-            sendQueue.AddLast(existing);
-            return true;
-        }
-        if (!frame.LatestState)
-            sendStates.Clear();
-
-        if (sendQueue.Count >= MpLimits.SendQueue)
-            return false;
-
-        var node = sendQueue.AddLast(frame);
-        if (frame.LatestState && frame.Key is { } stateKey)
-            sendStates[stateKey] = node;
-        shouldSignal = true;
-        return true;
-    }
-
-    private bool EnqueueReceive(RelayEvent item, bool latestState, StateKey? key)
+    // False only when Required items alone reach the hard limit; a sample or a cue that finds
+    // the queue there is dropped instead, and the connection stays up.
+    private bool EnqueueReceive(RelayEvent item, DeliveryClass deliveryClass, StateKey? key)
     {
         lock (receiveLock)
         {
-            if (latestState && key is { } stateKey && receiveStates.TryGetValue(stateKey, out var existing))
-            {
-                existing.Value = item;
-                receiveQueue.Remove(existing);
-                receiveQueue.AddLast(existing);
+            if (receiveQueue.Enqueue(item, deliveryClass, key, out _) != DeliveryResult.Overflow)
                 return true;
-            }
-            if (!latestState)
-                receiveStates.Clear();
-            if (receiveQueue.Count >= MpLimits.ReceiveQueue)
+            if (deliveryClass == DeliveryClass.Required)
                 return false;
-            var node = receiveQueue.AddLast(item);
-            if (latestState && key is { } newKey)
-                receiveStates[newKey] = node;
+            Interlocked.Increment(ref droppedAtLimit);
             return true;
         }
     }
@@ -750,7 +726,6 @@ public sealed class RelayClient : IRelayTransport
         lock (sendLock)
         {
             sendQueue.Clear();
-            sendStates.Clear();
         }
         lock (stateLock)
         {
@@ -760,6 +735,7 @@ public sealed class RelayClient : IRelayTransport
             if (status == RelayStatus.Closed || (status == RelayStatus.Disconnected && disposed))
                 return;
             status = RelayStatus.Closed;
+            closeError = error;
             cts = lifetime;
             lifetime = null;
         }
@@ -773,9 +749,8 @@ public sealed class RelayClient : IRelayTransport
         lock (receiveLock)
         {
             receiveQueue.Clear();
-            receiveStates.Clear();
             if (notify)
-                receiveQueue.AddLast(new RelayClosed(error));
+                receiveQueue.Enqueue(new RelayClosed(error), DeliveryClass.Required, null, out _);
         }
     }
     private MpError GetDisconnectError()
@@ -805,31 +780,46 @@ public sealed class RelayClient : IRelayTransport
     private static async Task SendDirectAsync(ClientWebSocket client, byte[] bytes, CancellationToken token)
         => await client.SendAsync(bytes, WebSocketMessageType.Text, true, token).ConfigureAwait(false);
 
-    private static async Task<(WebSocketMessageType MessageType, byte[] Bytes)> ReceiveHandshakeAsync(
-        ClientWebSocket client, CancellationToken token)
-        => await ReceiveMessageAsync(client, token).ConfigureAwait(false);
-
+    // timeIdle: the handshake is bounded from its first byte (no liveness monitor exists yet). An
+    // established connection waits for its next message without a timer — liveness
+    // (LivenessSeconds, heartbeat-driven) decides when silence means dead — and only a message
+    // that has started must finish within AssemblyTimeout. Before 2026-09-23 the timer also ran
+    // while idle, so 10 s of silence ended the connection ahead of the documented 12 s.
     private static async Task<(WebSocketMessageType MessageType, byte[] Bytes)> ReceiveMessageAsync(
-        WebSocket webSocket, CancellationToken token)
+        WebSocket webSocket, byte[] buffer, bool timeIdle, CancellationToken token)
     {
-        var buffer = new byte[16 * 1024];
         using var assemblyCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-        assemblyCts.CancelAfter(WireProtocol.AssemblyTimeout);
-        using var stream = new MemoryStream();
-        var fragments = 0;
-        while (true)
+        if (timeIdle)
+            assemblyCts.CancelAfter(WireProtocol.AssemblyTimeout);
+        // Only a fragmented message needs an accumulator; the common single-frame message is
+        // copied straight out of the scratch buffer. Limits and their order are unchanged.
+        MemoryStream? stream = null;
+        try
         {
-            var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), assemblyCts.Token)
-                .ConfigureAwait(false);
-            if (result.MessageType == WebSocketMessageType.Close)
-                return (result.MessageType, Array.Empty<byte>());
-            if (++fragments > WireProtocol.MaxFragments)
-                throw new InvalidDataException("Too many WebSocket fragments.");
-            if (stream.Length + result.Count > WireProtocol.MaxJsonBytes)
-                throw new InvalidDataException("WebSocket message exceeds the protocol size limit.");
-            stream.Write(buffer, 0, result.Count);
-            if (result.EndOfMessage)
-                return (result.MessageType, stream.ToArray());
+            var fragments = 0;
+            while (true)
+            {
+                var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), assemblyCts.Token)
+                    .ConfigureAwait(false);
+                if (result.MessageType == WebSocketMessageType.Close)
+                    return (result.MessageType, Array.Empty<byte>());
+                if (++fragments > WireProtocol.MaxFragments)
+                    throw new InvalidDataException("Too many WebSocket fragments.");
+                if ((stream?.Length ?? 0) + result.Count > WireProtocol.MaxJsonBytes)
+                    throw new InvalidDataException("WebSocket message exceeds the protocol size limit.");
+                if (result.EndOfMessage && stream is null)
+                    return (result.MessageType, buffer.AsSpan(0, result.Count).ToArray());
+                if (stream is null && !timeIdle)
+                    assemblyCts.CancelAfter(WireProtocol.AssemblyTimeout);
+                stream ??= new MemoryStream();
+                stream.Write(buffer, 0, result.Count);
+                if (result.EndOfMessage)
+                    return (result.MessageType, stream.ToArray());
+            }
+        }
+        finally
+        {
+            stream?.Dispose();
         }
     }
 

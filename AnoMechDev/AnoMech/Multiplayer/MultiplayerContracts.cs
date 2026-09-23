@@ -36,6 +36,10 @@ public interface IRelayTransport : IDisposable
     RelayTransportStats Stats { get; }
     Task<MpError> ConnectAsync(RelayConnectionOptions options, CancellationToken cancellationToken);
     bool TrySend(Guid runId, MpMessage message);
+    // Diagnostic only: why the most recent TrySend returned false (None when unknown). Lets the
+    // session report the actual cause instead of collapsing every refusal into QueueOverflow;
+    // it never changes whether or when the session closes.
+    MpError LastSendFailure => MpError.None;
     bool TryReceive(out RelayEvent? item);
 }
 

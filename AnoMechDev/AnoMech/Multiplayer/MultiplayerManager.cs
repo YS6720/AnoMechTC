@@ -223,6 +223,8 @@ internal sealed partial class MultiplayerManager : IMultiplayerGame, IDisposable
         // This also retires the owned relay/tunnel when the host socket closes.
         // Reset may retain the mapped zone even without an active run.
         var error = LastError;
+        if (Session.CloseDetail is { } detail)
+            CrashTrace.Log($"[多人] 連線因自身送出被拒而結束：{detail}");
         DisconnectInternal();
         Report(error);
     }

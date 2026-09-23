@@ -289,4 +289,94 @@ public static class WorldValidation
         return true;
     }
 
+    // Failure path only, never used to accept or reject: name the bound a rejected snapshot
+    // crossed, so content that outgrows the protocol limits (TOP P6, 2026-09-21: 69 live
+    // helpers against 64) shows up in the trace as counts instead of a bare InvalidMessage.
+    // Counts, indexes and ids only — no payload text. Never throws.
+    public static string DescribeWorld(WorldSnapshotMessage? message)
+    {
+        if (message is null) return "world=null";
+        try
+        {
+            var text = $"enemies={Count(message.Enemies, MpLimits.Enemies)} " +
+                $"eventObjects={Count(message.EventObjects, MpLimits.EventObjects)} " +
+                $"tethers={Count(message.Tethers, MpLimits.Tethers)} " +
+                $"staticVisuals={Count(message.StaticVisuals, MpLimits.StaticVisuals)} " +
+                $"partyMarkers={Count(message.PartyMarkers, MpLimits.Markers)}";
+            if (FirstInvalidElement(message) is { } invalid) return $"{text} {invalid}";
+            return text.Contains("(over)", StringComparison.Ordinal)
+                ? text
+                : $"{text} elements-valid(duplicate-id/tether-endpoint/marker/ack)";
+        }
+        catch (Exception ex)
+        {
+            return $"describe-failed:{ex.GetType().Name}";
+        }
+    }
+
+    public static string DescribeRoles(RolesSnapshotMessage? message)
+    {
+        if (message?.Roles is null) return "roles=null";
+        try
+        {
+            for (var i = 0; i < message.Roles.Length; i++)
+            {
+                var role = message.Roles[i];
+                if (ValidateRole(role)) continue;
+                if (role is null) return $"roles={message.Roles.Length} role[{i}]=null";
+                var failed = new List<string>(5);
+                if (!Enum.IsDefined(role.Role)) failed.Add("role");
+                if (!ValidatePose(role.Pose)) failed.Add("pose");
+                if (!ValidateStatuses(role.Statuses)) failed.Add($"statuses={Count(role.Statuses)}/{MpLimits.Statuses}");
+                if (!FiniteRange(role.HpFraction, 0f, 1f)) failed.Add("hp");
+                if (!ValidateJobResources(role.Resources)) failed.Add("resources");
+                return $"roles={message.Roles.Length} role[{i}]={role.Role} failed={string.Join(',', failed)}";
+            }
+            return $"roles={message.Roles.Length}/{MpLimits.Members} elements-valid(duplicate-role/limit-break)";
+        }
+        catch (Exception ex)
+        {
+            return $"describe-failed:{ex.GetType().Name}";
+        }
+    }
+
+    private static string Count<T>(T[]? items) => items is null ? "null" : items.Length.ToString();
+
+    private static string Count<T>(T[]? items, int limit)
+        => items is null ? "null" : items.Length > limit ? $"{items.Length}/{limit}(over)" : $"{items.Length}/{limit}";
+
+    private static string? FirstInvalidElement(WorldSnapshotMessage message)
+    {
+        if (message.Enemies is { } enemies)
+            for (var i = 0; i < enemies.Length; i++)
+                if (!ValidateEnemy(enemies[i]))
+                    return $"enemy[{i}] {DescribeEnemy(enemies[i])}";
+        if (message.EventObjects is { } eventObjects)
+            for (var i = 0; i < eventObjects.Length; i++)
+                if (!ValidateEventObject(eventObjects[i])) return $"eventObject[{i}]";
+        if (message.Tethers is { } tethers)
+            for (var i = 0; i < tethers.Length; i++)
+                if (!ValidateTether(tethers[i])) return $"tether[{i}]";
+        if (message.StaticVisuals is { } visuals)
+            for (var i = 0; i < visuals.Length; i++)
+                if (!ValidateStaticVisual(visuals[i])) return $"staticVisual[{i}]";
+        if (message.PartyMarkers is { } markers)
+            for (var i = 0; i < markers.Length; i++)
+                if (!ValidatePartyMarker(markers[i])) return $"partyMarker[{i}]";
+        return null;
+    }
+
+    private static string DescribeEnemy(EnemyState? enemy)
+    {
+        if (enemy is null) return "null";
+        var failed = new List<string>(6);
+        if (!(enemy.NetId > 0 && enemy.BnpcBaseId > 0)) failed.Add("id");
+        if (!FiniteRange(enemy.Scale, 0.001f, 100f)) failed.Add("scale");
+        if (!FiniteRange(enemy.HitboxRadius, 0f, MpLimits.CoordinateLimit)) failed.Add("hitbox");
+        if (enemy.EnemyListMode > 3) failed.Add("listMode");
+        if (!ValidatePose(enemy.Pose)) failed.Add("pose");
+        if (!ValidateStatuses(enemy.Statuses)) failed.Add($"statuses={Count(enemy.Statuses)}/{MpLimits.Statuses}");
+        if (enemy.CurrentHp > enemy.MaxHp) failed.Add("hp>max");
+        return $"netId={enemy.NetId} base={enemy.BnpcBaseId} failed={string.Join(',', failed)}";
+    }
 }

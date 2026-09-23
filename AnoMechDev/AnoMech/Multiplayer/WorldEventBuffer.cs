@@ -19,24 +19,25 @@ internal sealed class WorldEventBuffer
     public void ObserveEnemy(EnemyState enemy)
     {
         EnsureHealthy();
-        if (!WorldValidation.ValidateEnemy(enemy)) Fail(MpError.InvalidMessage);
+        if (!WorldValidation.ValidateEnemy(enemy))
+            Fail(MpError.InvalidMessage, $"event enemy {Identify(enemy)}");
         if (!eventEnemies.ContainsKey(enemy.NetId) && eventEnemies.Count >= MpLimits.Enemies)
-            Fail(MpError.Capacity);
+            Fail(MpError.Capacity, $"event enemies={eventEnemies.Count + 1}/{MpLimits.Enemies}");
         eventEnemies[enemy.NetId] = enemy;
     }
 
     public void Add(WorldEvent item)
     {
         EnsureHealthy();
-        if (!WorldValidation.ValidateEvent(item)) Fail(MpError.InvalidMessage);
-        if (events.Count >= MpLimits.SendQueue) Fail(MpError.Capacity);
+        if (!WorldValidation.ValidateEvent(item)) Fail(MpError.InvalidMessage, $"event {TypeName(item)}");
+        if (events.Count >= MpLimits.SendQueue) Fail(MpError.Capacity, $"pending events={events.Count}/{MpLimits.SendQueue}");
         events.Add(item);
     }
 
     public WorldSnapshotMessage Capture(WorldSnapshotMessage current)
     {
         EnsureHealthy();
-        if (!WorldValidation.ValidateWorld(current)) Fail(MpError.InvalidMessage);
+        if (!WorldValidation.ValidateWorld(current)) Fail(MpError.InvalidMessage, WorldValidation.DescribeWorld(current));
         retirementSnapshot = null;
         if (eventEnemies.Count == 0) return current;
         activeIds.Clear();
@@ -45,7 +46,8 @@ internal sealed class WorldEventBuffer
         foreach (var id in eventEnemies.Keys)
             if (!activeIds.Contains(id)) retiredCount++;
         if (retiredCount == 0) return current;
-        if (current.Enemies.Length + retiredCount > MpLimits.Enemies) Fail(MpError.Capacity);
+        if (current.Enemies.Length + retiredCount > MpLimits.Enemies)
+            Fail(MpError.Capacity, $"enemies={current.Enemies.Length}+{retiredCount} retained/{MpLimits.Enemies}");
         var retained = new EnemyState[current.Enemies.Length + retiredCount];
         current.Enemies.CopyTo(retained, 0);
         var index = current.Enemies.Length;
@@ -72,10 +74,12 @@ internal sealed class WorldEventBuffer
         return result;
     }
 
-    public void Fail(MpError error)
+    public void Fail(MpError error, string? detail = null)
     {
-        failure ??= error;
-        throw new MpProtocolException(failure.Value);
+        // The first failure latches; its detail (trace text only) rides on that first throw.
+        if (failure is { } latched) throw new MpProtocolException(latched);
+        failure = error;
+        throw new MpProtocolException(error, detail);
     }
 
     public void Clear()
@@ -90,4 +94,11 @@ internal sealed class WorldEventBuffer
     {
         if (failure is { } error) throw new MpProtocolException(error);
     }
+
+    // Trace-detail helpers take nullable parameters so building a detail never changes the
+    // caller's null-state (and cannot itself throw on the failure path).
+    private static string Identify(EnemyState? enemy)
+        => enemy is null ? "null" : $"netId={enemy.NetId} base={enemy.BnpcBaseId}";
+
+    private static string TypeName(object? value) => value?.GetType().Name ?? "null";
 }

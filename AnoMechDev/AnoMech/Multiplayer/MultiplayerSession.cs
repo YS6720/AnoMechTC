@@ -71,6 +71,9 @@ public sealed class MultiplayerSession : IDisposable
     public RelayIdentity? Identity { get; private set; }
     public MultiplayerPhase Phase { get; private set; } = MultiplayerPhase.Connecting;
     public MpError LastError { get; private set; }
+    // Trace-only: which own message was refused and why, when a refused send ended the session.
+    // Set once; never sent to peers or shown as the error code.
+    public string? CloseDetail { get; private set; }
     public IReadOnlyList<LobbyMember> Members => roster;
     public bool IsHost => Identity?.IsHost == true;
     public bool Paused => game.Paused;
@@ -838,7 +841,18 @@ public sealed class MultiplayerSession : IDisposable
     {
         if (!disposed && transport.TrySend(runId, message))
             return true;
-        Close(MpError.QueueOverflow);
+        if (!disposed)
+        {
+            // Close exactly as before, but with the transport's actual refusal (own-message
+            // validation, reliable rate/queue pressure, socket already closed) instead of
+            // always QueueOverflow: 0.20.3.1's own-validation regression surfaced as
+            // QueueOverflow and was first read as a network problem.
+            var reason = transport.LastSendFailure;
+            if (reason == MpError.None)
+                reason = MpError.QueueOverflow;
+            CloseDetail ??= $"send {message?.GetType().Name ?? "null"} refused: {reason}";
+            Close(reason);
+        }
         return false;
     }
 

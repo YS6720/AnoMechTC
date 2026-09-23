@@ -21,6 +21,7 @@
     <Compile Include="..\..\AnoMech\Multiplayer\Protocol.cs" Link="Shared\Protocol.cs" />
     <Compile Include="..\..\AnoMech\Multiplayer\MpValidation.cs" Link="Shared\MpValidation.cs" />
     <Compile Include="..\..\AnoMech\Multiplayer\WireProtocol.cs" Link="Shared\WireProtocol.cs" />
+    <Compile Include="..\..\AnoMech\Multiplayer\DeliveryQueue.cs" Link="Shared\DeliveryQueue.cs" />
     <Compile Include="..\..\AnoMech\Multiplayer\WorldProtocol.cs" Link="Shared\WorldProtocol.cs" />
     <Compile Include="..\..\AnoMech\Multiplayer\WorldValidation.cs" Link="Shared\WorldValidation.cs" />
     <Compile Include="..\..\AnoMech\Multiplayer\MultiplayerContracts.cs" Link="Shared\MultiplayerContracts.cs" />

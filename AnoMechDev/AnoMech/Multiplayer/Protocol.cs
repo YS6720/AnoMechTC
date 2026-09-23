@@ -24,11 +24,17 @@ public static class MpLimits
     // 深度＝liveness 內會累積的訊息量；超過 liveness 心跳逾時本來就會斷，再大沒有意義。
     public const int SendQueue = (int)(LivenessSeconds * (PoseHz + SnapshotHz));
     public const int ReceiveQueue = SendQueue;
+    // 2026-09-23 起佇列到上面的深度不再斷線：改為丟掉技能動畫類提示與被取代的舊取樣、保留所有必要訊息與
+    // 每種狀態的最新一筆（DeliveryQueue）。只有「必要訊息本身」堆到這個深度才視為連線已死——
+    // 必要訊息（生命週期、大廳、場地／擊退等有狀態事件）平常只有個位數。
+    public const int QueueHardLimit = SendQueue * 4;
     // 收訊排空改成時間預算而不是「每幀固定 N 筆」：房主 alt-tab 時遊戲 FPS 掉到 15～30，
     // 固定筆數的排空能力跟著腰斬，訊息堆積 → 成員看到延遲、嚴重就 QueueOverflow。
     // 每幀最多花 DrainBudgetMilliseconds 排空，DrainPerTickMax 只是防止單幀失控的硬上限。
     public const double DrainBudgetMilliseconds = 3;
     public const int DrainPerTickMax = 512;
+    // 單一送出端每秒上限（relay 以此限流）。client 端改在送出迴圈排隊等待（2026-09-23 前可靠訊息
+    // 超過就自己斷線 RateLimit），平常 ~100～140/s 不會碰到。
     public const int MessagesPerSenderSecond = 256;
     // 突發額度＝relay 願意容忍的靜默時間 × 單向送出頻率。這個數字**不可以自己挑**：
     // 固定 512 時實測 5 秒收包停頓會把七個 peer 全部踢掉（512÷120≈4.3 秒就耗盡），
@@ -63,18 +69,23 @@ public static class MpLimits
     // 維護者 回報最痛的是房主自己被踢、整房要重開重連；房主送 ~140/s（120 role/self ＋
     // 20 world）比 peer 更快燒完突發額度，中彈機率更高。12 秒＝漏 6 次。
     // 代價是真的斷線時全房要 12 秒才發現，不是零成本；再往上調那個延遲會蓋過好處。
+    // 2026-09-23 統一：連線建立後「閒置多久算死」與「單次送出卡住多久算死」都只看這個值
+    // （client 心跳檢查、relay liveness 掃描、兩端送出逾時）。之前收訊迴圈另有 IoTimeout 10 秒的
+    // 閒置計時，實際 10 秒就斷、比這裡宣稱的 12 秒早。
     public const double LivenessSeconds = 12;
     public const double PrepareSeconds = 15;
+    // 只用於連線建立（connect／握手）與「已開始收的單一訊息必須收完」；不再用來判斷閒置。
     public const double IoTimeoutSeconds = 10;
 }
 
 /// <summary>
 /// Transport-level health for the UI: none of this is authoritative for game state.
 /// RttMilliseconds is heartbeat round-trip through the relay including local queue wait
-/// (so a stalled send loop shows up here too); negative means not measured yet.
+/// (so a stalled send loop shows up here too); negative means not measured yet. ShedFrames counts
+/// cues and superseded samples dropped under lag instead of disconnecting (DeliveryQueue).
 /// </summary>
 public readonly record struct RelayTransportStats(
-    double RttMilliseconds, int SendQueueDepth, int ReceiveQueueDepth, long SkippedLatestState);
+    double RttMilliseconds, int SendQueueDepth, int ReceiveQueueDepth, long ShedFrames);
 
 public enum MpError
 {

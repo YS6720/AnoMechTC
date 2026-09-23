@@ -18,13 +18,23 @@ namespace AnoMech.Core;
 /// 36 行／100 ms，等於主執行緒每 100 ms 做 36 次 fsync，維護者看到整個畫面停頓。
 /// 只有 <see cref="Exception"/> 與 <see cref="Session"/> 這種一次性高風險點才真正落盤。
 ///
-/// 檔案位置：插件 config 目錄下的 anomech-trace.log（每次 Start 追加，不清空）。
+/// 檔案位置：插件 config 目錄下的 anomech-trace.log（追加寫入）。插件載入後第一次寫入時，
+/// 若已超過 <see cref="RotateBytes"/> 就改名成 anomech-trace.1.log（覆蓋更舊的那份）再開新檔——
+/// 2026-09-23 前只追加不清，08-19 起累積到 44.5 MB。
+///
+/// dalamud.log 只同步關鍵行（<see cref="MirroredPrefixes"/>、<see cref="Session"/>、
+/// <see cref="Exception"/>）；技能循環、狀態、場地、NPC 台詞等只寫本檔。
 /// </summary>
 internal static class CrashTrace
 {
     private static readonly object Gate = new();
     private static string? path;
     private static FileStream? stream;
+
+    private const long RotateBytes = 16L * 1024 * 1024;
+
+    // 載入／開場標記、連線、顯示給玩家的錯誤。以前每一行都在 dalamud.log 再寫一份。
+    private static readonly string[] MirroredPrefixes = ["===", "[多人]", "[relay]", "[chat!]"];
 
     private static FileStream? Stream
     {
@@ -33,6 +43,7 @@ internal static class CrashTrace
             if (stream != null) return stream;
             try
             {
+                RotateIfLarge(Path);
                 stream = new FileStream(Path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite, 1, FileOptions.None);
             }
             catch
@@ -40,6 +51,20 @@ internal static class CrashTrace
                 stream = null;
             }
             return stream;
+        }
+    }
+
+    private static void RotateIfLarge(string current)
+    {
+        try
+        {
+            var info = new FileInfo(current);
+            if (!info.Exists || info.Length <= RotateBytes) return;
+            File.Move(current, System.IO.Path.ChangeExtension(current, ".1.log"), overwrite: true);
+        }
+        catch
+        {
+            // 改名失敗（例如舊檔正被編輯器鎖住）就照舊追加：診斷不能因此停擺。
         }
     }
 
@@ -66,13 +91,21 @@ internal static class CrashTrace
     /// <summary>使用者要去哪裡撈這支檔。</summary>
     public static string FilePath => Path;
 
-    /// <summary>寫一行並交給 OS；同時進 Dalamud log（正常結束時方便一起看）。</summary>
-    public static void Log(string message) => Write(message, toDisk: false);
+    /// <summary>寫一行並交給 OS；關鍵行（<see cref="MirroredPrefixes"/>）同時進 Dalamud log。</summary>
+    public static void Log(string message) => Write(message, toDisk: false, mirror: IsKeyLine(message));
 
-    private static void Write(string message, bool toDisk)
+    private static bool IsKeyLine(string message)
+    {
+        foreach (var prefix in MirroredPrefixes)
+            if (message.StartsWith(prefix, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    private static void Write(string message, bool toDisk, bool mirror)
     {
         var line = $"[{DateTime.Now:HH:mm:ss.fff}] {message}";
-        try { Plugin.Log.Information($"[trace] {message}"); } catch { /* log 尚未就緒 */ }
+        if (mirror)
+            try { Plugin.Log.Information($"[trace] {message}"); } catch { /* log 尚未就緒 */ }
         lock (Gate)
         {
             try
@@ -107,22 +140,22 @@ internal static class CrashTrace
     public static void Session(string what)
     {
         Log(new string('=', 60));
-        Write($"=== {what} ===", toDisk: true);
+        Write($"=== {what} ===", toDisk: true, mirror: true);
     }
 
-    /// <summary>把例外（含 inner 與堆疊）完整寫進追蹤檔。</summary>
+    /// <summary>把例外（含 inner 與堆疊）完整寫進追蹤檔，也完整進 Dalamud log。</summary>
     public static void Exception(string where, System.Exception ex)
     {
-        Log($"!!! 例外於 {where}: {ex.GetType().FullName}: {ex.Message}");
-        Log(ex.StackTrace ?? "(無堆疊)");
+        Write($"!!! 例外於 {where}: {ex.GetType().FullName}: {ex.Message}", toDisk: false, mirror: true);
+        Write(ex.StackTrace ?? "(無堆疊)", toDisk: false, mirror: true);
         var inner = ex.InnerException;
         var depth = 0;
         while (inner != null && depth++ < 5)
         {
-            Log($"  --> inner[{depth}] {inner.GetType().FullName}: {inner.Message}");
-            Log(inner.StackTrace ?? "(無堆疊)");
+            Write($"  --> inner[{depth}] {inner.GetType().FullName}: {inner.Message}", toDisk: false, mirror: true);
+            Write(inner.StackTrace ?? "(無堆疊)", toDisk: false, mirror: true);
             inner = inner.InnerException;
         }
-        Write("!!! 例外記錄完畢", toDisk: true);
+        Write("!!! 例外記錄完畢", toDisk: true, mirror: true);
     }
 }

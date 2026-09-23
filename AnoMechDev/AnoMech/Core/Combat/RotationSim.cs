@@ -36,6 +36,9 @@ public sealed unsafe class RotationSim : IDisposable
     private readonly EventScheduler localEvents = new();
     private readonly PracticeLimitBreakGauge limitBreakGauge = new();
     private int diagLeft = 12;
+    // 同一技能、同一原因的被拒按鍵：第一次記一行，之後同一 key 每 5 秒最多一行並帶中間次數
+    // （2026-09-23 Owner）。按住或連按被拒的鍵以前每按一次就記，單場最多 2434 行、占 trace 近半。
+    private readonly RepeatedLogLimiter<(uint Action, uint Status)> rejectedPresses = new(5000);
     private long schedulerGeneration;
     private long lastUpdateMilliseconds;
     private long limitBreakProbeGeneration = -1;
@@ -217,15 +220,19 @@ public sealed unsafe class RotationSim : IDisposable
                 CrashTrace.Log($"[循環] UseAction a={actionId} ret={ret} inSim={inSim}");
             }
             var areaTargeted = outOpt != null && *outOpt;
-            // 客戶端拒絕的按鍵（ret=0）全部記下原因碼：GetActionStatus 回 LogMessage id
+            // 客戶端拒絕的按鍵（ret=0）記下原因碼：GetActionStatus 回 LogMessage id
             // （0＝可用；例如 572 量譜不足、1122 前置條件不符）。以前只記騎士幾個 id，
-            // 2026-09-16 武士的明鏡止水被拒時什麼都看不到。
+            // 2026-09-16 武士的明鏡止水被拒時什麼都看不到。重複的由 rejectedPresses 合併。
             if (ret == 0 && actionType == ActionType.Action && inSim)
             {
                 var adjusted = am->GetAdjustedActionId(actionId);
                 var status = am->GetActionStatus(ActionType.Action, adjusted);
-                var text = status == 0 ? "" : Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.LogMessage>()?.GetRowOrDefault(status)?.Text.ExtractText() ?? "";
-                CrashTrace.Log($"[循環] 按鍵被拒 a={actionId} adjusted={adjusted} status={status} {text}");
+                if (rejectedPresses.ShouldWrite((adjusted, status), Environment.TickCount64, out var repeats))
+                {
+                    var text = status == 0 ? "" : Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.LogMessage>()?.GetRowOrDefault(status)?.Text.ExtractText() ?? "";
+                    CrashTrace.Log($"[循環] 按鍵被拒 a={actionId} adjusted={adjusted} status={status} {text}" +
+                        (repeats > 0 ? $"（上一筆後同原因再 {repeats} 次）" : ""));
+                }
             }
             if (ret != 0 && canProcess && !areaTargeted && outermost &&
                 (actionType == ActionType.Action || generalTankLimitBreak || generalSprint))
@@ -426,8 +433,6 @@ public sealed unsafe class RotationSim : IDisposable
         var am = ActionManager.Instance();
         if (am != null)
         {
-            CrashTrace.Log($"[循環] 回包後 used={am->LastUsedActionSequence} handled={am->LastHandledActionSequence}"
-                         + $" combo={am->Combo.Action}/{am->Combo.Timer:F1}");
             if (am->LastHandledActionSequence != am->LastUsedActionSequence)
                 am->LastHandledActionSequence = am->LastUsedActionSequence;
             am->Combo.Action = CurrentCombo;
@@ -591,8 +596,11 @@ public sealed unsafe class RotationSim : IDisposable
                     if (!recastSnapshotTaken && amx != null)
                         SnapshotRecasts(amx);
                 }
-                else if (amx != null)
-                    RestoreRecasts(amx);
+                else
+                {
+                    if (amx != null) RestoreRecasts(amx);
+                    FlushRejectedPresses();
+                }
                 wasInSim = inSim;
             }
             else if (!inSim && recastSnapshotTaken && amx != null)
@@ -648,6 +656,11 @@ public sealed unsafe class RotationSim : IDisposable
         }
         catch { /* 每幀路徑，靜默防護 */ }
     }
+    private void FlushRejectedPresses()
+    {
+        foreach (var ((action, status), repeats) in rejectedPresses.Drain())
+            CrashTrace.Log($"[循環] 按鍵被拒 adjusted={action} status={status}：上一筆後同原因再 {repeats} 次（未逐筆記）");
+    }
     private void ResetLocalState()
     {
         shadowCombo = 0;
@@ -658,6 +671,7 @@ public sealed unsafe class RotationSim : IDisposable
     public void Dispose()
     {
         Plugin.Framework.Update -= ReassertCombo;
+        FlushRejectedPresses();
         castingAction = awaitingAction = null;
         LocalJobResources.End();
         if (ReferenceEquals(Instance, this)) Instance = null;

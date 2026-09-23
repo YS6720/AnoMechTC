@@ -74,7 +74,7 @@ internal sealed class MultiplayerPanel(Plugin plugin)
         DrawQuality(session.TransportStats);
     }
 
-    // 連線品質一行：RTT（心跳來回，含本機佇列等待）、送出／接收佇列深度、略過的位置取樣。
+    // 連線品質一行：RTT（心跳來回，含本機佇列等待）、送出／接收佇列深度、跟不上時略過的舊取樣與動畫提示。
     // 顏色只看 RTT 與佇列：綠＝正常、黃＝開始堆積、紅＝快被判斷線。
     private static void DrawQuality(RelayTransportStats stats)
     {
@@ -87,9 +87,9 @@ internal sealed class MultiplayerPanel(Plugin plugin)
             : Ok;
         ImGui.TextColored(color,
             $"連線品質：RTT {rtt}｜送出佇列 {stats.SendQueueDepth}｜接收佇列 {stats.ReceiveQueueDepth}" +
-            (stats.SkippedLatestState > 0 ? $"｜略過位置取樣 {stats.SkippedLatestState}" : ""));
+            (stats.ShedFrames > 0 ? $"｜跟不上略過 {stats.ShedFrames}" : ""));
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("RTT＝心跳經 relay 來回的時間，含本機送出佇列等待。\n佇列持續堆高＝這台電腦或網路跟不上；超過 12 秒沒收到任何訊息會被判斷線。\n略過位置取樣＝送不出去時丟掉舊位置、保留最新，不會斷線。");
+            ImGui.SetTooltip("RTT＝心跳經 relay 來回的時間，含本機送出佇列等待。\n佇列持續堆高＝這台電腦或網路跟不上；超過 12 秒沒收到任何訊息會被判斷線。\n跟不上略過＝網路或畫面卡住時丟掉過時的位置／狀態取樣與技能動畫提示，保留最新狀態與必要事件，不會因此斷線。");
     }
 
     // 繁中狀態字樣；enum 名稱只在診斷區出現。

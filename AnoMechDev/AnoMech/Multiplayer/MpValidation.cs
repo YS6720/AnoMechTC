@@ -4,7 +4,10 @@ using AnoMech.Core.Game.Party;
 
 namespace AnoMech.Multiplayer;
 
-public sealed class MpProtocolException(MpError error) : Exception(error.ToString())
+// Detail is trace text only (counts/limits/type names, never payload or identities); the
+// session acts on Error alone.
+public sealed class MpProtocolException(MpError error, string? detail = null)
+    : Exception(detail is null ? error.ToString() : $"{error}: {detail}")
 {
     public MpError Error { get; } = error;
 }

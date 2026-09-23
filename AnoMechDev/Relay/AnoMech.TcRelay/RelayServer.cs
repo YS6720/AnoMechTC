@@ -127,6 +127,13 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
         public bool Joined;
         public bool Closed;
         public bool ResourcesDisposed;
+        // Lag shedding readout: frames dropped for this receiver, and when it was last logged.
+        public long ShedTotal;
+        public long LastShedLogTimestamp;
+        // Receive scratch for this connection's handshake and receive loop, which run strictly
+        // one after the other; each returned payload is a fresh copy. Replaces a new 16 KiB
+        // buffer per received message (hundreds per second in a full room).
+        public readonly byte[] ReceiveBuffer = new byte[16 * 1024];
 
         public PeerConnection(Room room, WebSocket socket, bool isHost, CancellationToken serverToken,
             CancellationToken grantToken)
@@ -138,53 +145,59 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
         }
     }
 
-    private sealed record RelayOutboundItem(byte[] Bytes, bool LatestState, StateKey? Key);
+    private sealed record RelayOutboundItem(byte[] Bytes, DeliveryClass Class, StateKey? Key);
     private readonly record struct StateKey(Guid SenderId, Guid RunId, Type MessageType);
 
-    /// <summary>Bounded, single-consumer send queue. Reliable items are never silently dropped.</summary>
+    /// <summary>
+    /// Bounded, single-consumer send queue per receiver. A receiver that falls behind is shed —
+    /// cues and superseded samples dropped, Required items kept in order (DeliveryQueue) — where
+    /// it used to be disconnected (and a lagging host took the whole room with it). Only a
+    /// Required backlog at QueueHardLimit still fails.
+    /// </summary>
     private sealed class RelayOutboundQueue : IDisposable
     {
         private readonly object sync = new();
-        private readonly LinkedList<RelayOutboundItem> items = new();
-        private readonly Dictionary<StateKey, LinkedListNode<RelayOutboundItem>> latest = new();
+        private readonly DeliveryQueue<byte[], StateKey> items = new(MpLimits.SendQueue, MpLimits.QueueHardLimit);
         private readonly SemaphoreSlim signal = new(0);
         private bool disposed;
 
-        public bool Enqueue(RelayOutboundItem item)
+        /// <summary>False when disposed or when a Required item meets the hard limit.
+        /// <paramref name="shed"/> counts items this call dropped (including itself).</summary>
+        public bool Enqueue(RelayOutboundItem item, out int shed)
         {
             lock (sync)
             {
+                shed = 0;
                 if (disposed) return false;
-                if (item.LatestState && item.Key is { } key && latest.TryGetValue(key, out var existing))
+                var result = items.Enqueue(item.Bytes, item.Class, item.Key, out shed);
+                if (result == DeliveryResult.Coalesced) return true;
+                if (result == DeliveryResult.Overflow)
                 {
-                    existing.Value = item;
-                    items.Remove(existing);
-                    items.AddLast(existing);
+                    if (item.Class == DeliveryClass.Required) return false;
+                    shed++;
                     return true;
                 }
-                if (!item.LatestState) latest.Clear();
-                if (items.Count >= MpLimits.SendQueue) return false;
-                var node = items.AddLast(item);
-                if (item.LatestState && item.Key is { } stateKey) latest[stateKey] = node;
             }
             try { signal.Release(); } catch (ObjectDisposedException) { return false; }
             return true;
         }
 
-        public bool TryDequeue(out RelayOutboundItem? item)
+        public int Count
+        {
+            get { lock (sync) return items.Count; }
+        }
+
+        public bool TryDequeue(out byte[]? bytes)
         {
             lock (sync)
             {
-                if (items.First is not { } node)
+                if (items.TryDequeue(out var next))
                 {
-                    item = null;
-                    return false;
+                    bytes = next;
+                    return true;
                 }
-                item = node.Value;
-                items.RemoveFirst();
-                if (item.Key is { } key && latest.TryGetValue(key, out var mapped) && ReferenceEquals(mapped, node))
-                    latest.Remove(key);
-                return true;
+                bytes = null;
+                return false;
             }
         }
 
@@ -198,7 +211,6 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
                 if (disposed) return;
                 disposed = true;
                 items.Clear();
-                latest.Clear();
             }
             try { signal.Release(); } catch (ObjectDisposedException) { }
             signal.Dispose();
@@ -278,8 +290,16 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
         {
             if (disposed) throw new ObjectDisposedException(nameof(RelayServer));
             if (started) return false;
-            cancellationRegistration = cancellationToken.Register(
-                static state => ((CancellationTokenSource)state!).Cancel(), stopSource);
+            cancellationRegistration = cancellationToken.Register(static state =>
+            {
+                var server = (RelayServer)state!;
+                lock (server.roomsSync)
+                {
+                    server.stopSource.Cancel();
+                    // GetContextAsync 不接受 token；停止 listener 才能喚醒 accept loop。
+                    try { server.listener?.Stop(); } catch (ObjectDisposedException) { }
+                }
+            }, this);
             hasCancellationRegistration = true;
             if (stopSource.IsCancellationRequested)
             {
@@ -577,7 +597,9 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
                 connection = new PeerConnection(room!, socket!, isHost: false, serverToken, default);
             }
 
-            var handshake = await ReceiveMessageAsync(socket!, connection.Lifetime.Token).ConfigureAwait(false);
+            var handshake = await ReceiveMessageAsync(socket!, connection.ReceiveBuffer, timeIdle: true,
+                    connection.Lifetime.Token)
+                .ConfigureAwait(false);
             if (connection.Lifetime.IsCancellationRequested ||
                 handshake.MessageType != WebSocketMessageType.Text ||
                 !WireProtocol.TryDecodeHandshakeRequest(handshake.Bytes, out var request) ||
@@ -671,14 +693,29 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
     private void AbortWithReason(PeerConnection connection, string reason)
     {
         Log($"peer dropped  reason={reason}  peer={Short(connection.PeerId.ToString("N"))}");
-        connection.Socket.Abort();
+        try { connection.Socket.Abort(); } catch { }
+    }
+
+    // 跟不上的接收端以前直接踢（房主跟不上＝整房關閉）；現在改成丟掉動畫提示與被取代的舊取樣。
+    // 每位最多每 ShedLogSeconds 記一行，落後期間不會每筆封包都寫 log。
+    private const double ShedLogSeconds = 5;
+
+    private void NoteShed(PeerConnection target, int shed)
+    {
+        var total = Interlocked.Add(ref target.ShedTotal, shed);
+        var now = Stopwatch.GetTimestamp();
+        var last = Volatile.Read(ref target.LastShedLogTimestamp);
+        if (last != 0 && Stopwatch.GetElapsedTime(last, now).TotalSeconds < ShedLogSeconds) return;
+        if (Interlocked.CompareExchange(ref target.LastShedLogTimestamp, now, last) != last) return;
+        Log($"peer lagging  shed={total}  queued={target.Outbound.Count}  peer={Short(target.PeerId.ToString("N"))}");
     }
 
     private async Task RunReceiveLoopAsync(PeerConnection connection)
     {
         while (!connection.Lifetime.IsCancellationRequested && connection.Socket.State == WebSocketState.Open)
         {
-            var received = await ReceiveMessageAsync(connection.Socket, connection.Lifetime.Token).ConfigureAwait(false);
+            var received = await ReceiveMessageAsync(connection.Socket, connection.ReceiveBuffer, timeIdle: false,
+                connection.Lifetime.Token).ConfigureAwait(false);
             if (received.MessageType == WebSocketMessageType.Close) return;
             if (received.MessageType != WebSocketMessageType.Text ||
                 !WireProtocol.TryGetFrameType(received.Bytes, out var frameType))
@@ -840,14 +877,18 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
         byte[] bytes;
         try { bytes = WireProtocol.EncodeServerPacket(stamped); }
         catch { source.Socket.Abort(); return; }
-        var latest = packet.Message is ILatestState;
-        var key = latest ? new StateKey(source.PeerId, packet.RunId, packet.Message.GetType()) : (StateKey?)null;
+        var deliveryClass = MpDelivery.Classify(packet.Message);
+        var key = deliveryClass == DeliveryClass.LatestState
+            ? new StateKey(source.PeerId, packet.RunId, packet.Message.GetType())
+            : (StateKey?)null;
         foreach (var target in targets)
         {
-            // 送不出去＝這位成員讀得比房主送得慢，佇列在 liveness 內就滿了。以前只有
-            // Abort()，房主端看到的只是 PeerDisconnected；記下原因才分得出是網路還是主執行緒卡住。
-            if (!target.Outbound.Enqueue(new RelayOutboundItem(bytes, latest, key)))
+            // 接收端讀得比送出端慢時由佇列丟棄動畫提示與舊取樣（NoteShed 記一行），不再踢人。
+            // 只剩「必要訊息本身」堆到 QueueHardLimit 才放棄這條連線。
+            if (!target.Outbound.Enqueue(new RelayOutboundItem(bytes, deliveryClass, key), out var shed))
                 AbortWithReason(target, "outbound-overflow:packet");
+            else if (shed > 0)
+                NoteShed(target, shed);
         }
 
     }
@@ -859,12 +900,17 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
             while (!connection.Lifetime.IsCancellationRequested)
             {
                 await connection.Outbound.WaitAsync(connection.Lifetime.Token).ConfigureAwait(false);
-                if (!connection.Outbound.TryDequeue(out var item) || item is null) continue;
+                if (!connection.Outbound.TryDequeue(out var bytes) || bytes is null) continue;
                 using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(connection.Lifetime.Token);
-                sendCts.CancelAfter(TimeSpan.FromSeconds(MpLimits.IoTimeoutSeconds));
-                await connection.Socket.SendAsync(item.Bytes, WebSocketMessageType.Text, true, sendCts.Token)
+                // 單一訊息卡住多久算死與 liveness 同源（12 秒）；之前是 IoTimeout 10 秒。
+                sendCts.CancelAfter(TimeSpan.FromSeconds(MpLimits.LivenessSeconds));
+                await connection.Socket.SendAsync(bytes, WebSocketMessageType.Text, true, sendCts.Token)
                     .ConfigureAwait(false);
             }
+        }
+        catch (OperationCanceledException) when (!connection.Lifetime.IsCancellationRequested)
+        {
+            AbortWithReason(connection, $"send-timeout {MpLimits.LivenessSeconds:0}s");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -872,7 +918,7 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
         }
         catch
         {
-            connection.Socket.Abort();
+            try { connection.Socket.Abort(); } catch { }
         }
     }
 
@@ -888,17 +934,25 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
             lock (roomsSync) currentRooms = rooms.Values.ToArray();
             foreach (var room in currentRooms)
             {
-                (PeerConnection Peer, double SilentSeconds)[] stale;
-                lock (room.Sync)
-                    stale = room.Members.Values
-                        .Select(peer => (Peer: peer,
-                            SilentSeconds: Stopwatch.GetElapsedTime(Volatile.Read(ref peer.LastInboundTimestamp)).TotalSeconds))
-                        .Where(entry => entry.SilentSeconds > MpLimits.LivenessSeconds)
-                        .ToArray();
-                // 這條是「成員突然被踢」最常見的路，以前完全不記——2026-09-16 本機開房
-                // 連續數次都只看得到 PeerDisconnected 就是因為它靜默。
-                foreach (var (peer, silent) in stale)
-                    AbortWithReason(peer, $"liveness silent={silent:F1}s");
+                // 一間房出例外不能讓整個掃描迴圈結束（之後就沒有任何 liveness 判斷了）。
+                try
+                {
+                    (PeerConnection Peer, double SilentSeconds)[] stale;
+                    lock (room.Sync)
+                        stale = room.Members.Values
+                            .Select(peer => (Peer: peer,
+                                SilentSeconds: Stopwatch.GetElapsedTime(Volatile.Read(ref peer.LastInboundTimestamp)).TotalSeconds))
+                            .Where(entry => entry.SilentSeconds > MpLimits.LivenessSeconds)
+                            .ToArray();
+                    // 這條是「成員突然被踢」最常見的路，以前完全不記——2026-09-16 本機開房
+                    // 連續數次都只看得到 PeerDisconnected 就是因為它靜默。
+                    foreach (var (peer, silent) in stale)
+                        AbortWithReason(peer, $"liveness silent={silent:F1}s");
+                }
+                catch (Exception ex)
+                {
+                    Log($"liveness scan failed  room={room.Code}  error={ex.GetType().Name}");
+                }
             }
         }
     }
@@ -1040,11 +1094,16 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
             byte[] bytes;
             try { bytes = WireProtocol.EncodeControl(target.Room.RoomId, kind, peerId, sequence); }
             catch { target.Socket.Abort(); return; }
-            var key = kind == RelayControlKind.HeartbeatAck
+            // HeartbeatAck 只需要最新一筆；其餘 control（PeerJoined／PeerLeft）是必要訊息。
+            var heartbeatAck = kind == RelayControlKind.HeartbeatAck;
+            var key = heartbeatAck
                 ? new StateKey(Guid.Empty, Guid.Empty, typeof(RelayControlKind))
                 : (StateKey?)null;
-            if (!target.Outbound.Enqueue(new RelayOutboundItem(bytes, kind == RelayControlKind.HeartbeatAck, key)))
+            var deliveryClass = heartbeatAck ? DeliveryClass.LatestState : DeliveryClass.Required;
+            if (!target.Outbound.Enqueue(new RelayOutboundItem(bytes, deliveryClass, key), out var shed))
                 AbortWithReason(target, "outbound-overflow:control");
+            else if (shed > 0)
+                NoteShed(target, shed);
         }
     }
 
@@ -1423,24 +1482,43 @@ public sealed class RelayServer : IAsyncDisposable, IDisposable
         return false;
     }
 
+    // timeIdle: the handshake is bounded from its first byte (a joining peer is not in the room
+    // yet, so liveness cannot see it). An established connection waits for its next message
+    // without a timer — the liveness scan (LivenessSeconds) decides when silence means dead — and
+    // only a message that has started must finish within AssemblyTimeout. Before 2026-09-23 the
+    // timer also ran while idle, so 10 s of silence dropped a peer that liveness still allowed.
     private static async Task<(WebSocketMessageType MessageType, byte[] Bytes)> ReceiveMessageAsync(
-        WebSocket socket, CancellationToken token)
+        WebSocket socket, byte[] buffer, bool timeIdle, CancellationToken token)
     {
-        var buffer = new byte[16 * 1024];
         using var assemblyCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-        assemblyCts.CancelAfter(WireProtocol.AssemblyTimeout);
-        using var stream = new MemoryStream();
-        var fragments = 0;
-        while (true)
+        if (timeIdle)
+            assemblyCts.CancelAfter(WireProtocol.AssemblyTimeout);
+        // Only a fragmented message needs an accumulator; the common single-frame message is
+        // copied straight out of the scratch buffer. Limits and their order are unchanged.
+        MemoryStream? stream = null;
+        try
         {
-            var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), assemblyCts.Token)
-                .ConfigureAwait(false);
-            if (result.MessageType == WebSocketMessageType.Close)
-                return (result.MessageType, Array.Empty<byte>());
-            if (++fragments > MaxFragments) throw new InvalidDataException();
-            if (stream.Length + result.Count > WireProtocol.MaxJsonBytes) throw new InvalidDataException();
-            stream.Write(buffer, 0, result.Count);
-            if (result.EndOfMessage) return (result.MessageType, stream.ToArray());
+            var fragments = 0;
+            while (true)
+            {
+                var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), assemblyCts.Token)
+                    .ConfigureAwait(false);
+                if (result.MessageType == WebSocketMessageType.Close)
+                    return (result.MessageType, Array.Empty<byte>());
+                if (++fragments > MaxFragments) throw new InvalidDataException();
+                if ((stream?.Length ?? 0) + result.Count > WireProtocol.MaxJsonBytes) throw new InvalidDataException();
+                if (result.EndOfMessage && stream is null)
+                    return (result.MessageType, buffer.AsSpan(0, result.Count).ToArray());
+                if (stream is null && !timeIdle)
+                    assemblyCts.CancelAfter(WireProtocol.AssemblyTimeout);
+                stream ??= new MemoryStream();
+                stream.Write(buffer, 0, result.Count);
+                if (result.EndOfMessage) return (result.MessageType, stream.ToArray());
+            }
+        }
+        finally
+        {
+            stream?.Dispose();
         }
     }
 

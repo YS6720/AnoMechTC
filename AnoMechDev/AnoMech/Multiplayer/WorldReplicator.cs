@@ -115,11 +115,11 @@ public sealed unsafe class WorldReplicator : IDisposable
             EnsureCurrent();
             if (!omen.HasNetworkVisual || !omen.IsActive) continue;
             if (!omen.IsNetworkVisualReady)
-                throw Failure(MpError.NativeFailure);
+                throw Failure(MpError.NativeFailure, "static visual not ready");
             if (omen.NetworkPart is { } part)
             {
                 if (!resources.TryGetStaticKey(part.ResourcePath, out var key))
-                    throw Failure(MpError.UnsupportedResource);
+                    throw Failure(MpError.UnsupportedResource, $"static visual resource {part.ResourcePath}");
                 visuals.Add(new StaticVisualState(GetVisualId(omen, part.Part), key,
                     MpVector.From(part.Position), MpQuaternion.From(part.Rotation), MpVector.From(part.Scale)));
             }
@@ -127,11 +127,13 @@ public sealed unsafe class WorldReplicator : IDisposable
 
         var snapshot = eventBuffer.Capture(new WorldSnapshotMessage(enemies.ToArray(), eventObjects.ToArray(),
             tethers.ToArray(), visuals.ToArray(), CapturePartyMarkers(), markerAcks));
-        if (!WorldValidation.Validate(snapshot)) throw Failure(MpError.InvalidMessage);
+        if (!WorldValidation.Validate(snapshot)) throw Failure(MpError.InvalidMessage, WorldValidation.DescribeWorld(snapshot));
         foreach (var enemy in snapshot.Enemies)
-            if (!resources.TryValidateEnemy(enemy)) throw Failure(MpError.UnsupportedResource);
+            if (!resources.TryValidateEnemy(enemy))
+                throw Failure(MpError.UnsupportedResource, $"enemy base={enemy.BnpcBaseId} model={enemy.ModelCharaId}");
         foreach (var eventObject in snapshot.EventObjects)
-            if (!resources.TryValidateEventObject(eventObject)) throw Failure(MpError.UnsupportedResource);
+            if (!resources.TryValidateEventObject(eventObject))
+                throw Failure(MpError.UnsupportedResource, $"event object eobj={eventObject.EobjId}");
         return snapshot;
     }
 
@@ -156,7 +158,7 @@ public sealed unsafe class WorldReplicator : IDisposable
                 CaptureStatuses(member), hpFraction, member.CurrentActionTimeline, game.Abilities.JobResourceState(role));
         }
         var snapshot = new RolesSnapshotMessage(roles);
-        if (!WorldValidation.Validate(snapshot)) throw Failure(MpError.InvalidMessage);
+        if (!WorldValidation.Validate(snapshot)) throw Failure(MpError.InvalidMessage, WorldValidation.DescribeRoles(snapshot));
         return snapshot;
     }
 
@@ -968,7 +970,7 @@ public sealed unsafe class WorldReplicator : IDisposable
         if (!isCurrent()) throw Failure(MpError.Cancelled);
     }
 
-    private static MpProtocolException Failure(MpError error) => new(error);
+    private static MpProtocolException Failure(MpError error, string? detail = null) => new(error, detail);
 
     private static void RemoveStale<T>(Dictionary<int, T> values, HashSet<int> seen, Action<T> dispose)
     {
