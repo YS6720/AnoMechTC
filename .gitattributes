@@ -1,0 +1,5 @@
+# 換行規則（2026-09-23）：一般文字 LF；Windows 腳本 CRLF。repo 內已存為 CRLF 的檔案在 text=auto 下維持原樣。
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
