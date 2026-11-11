@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using AnoMech.Core.SimObjects;
+using AnoMech.Core.Native.Interfaces;
 
 namespace AnoMech.Core.Game;
 
@@ -237,7 +238,11 @@ public sealed class CharacterFind<T> where T : IPositioned
     // 3, 13 (cones) -> halfAngleRad default PI/6
     // 8 (charge) -> charge length default 100
     // 10 (donut) -> inner safe radius default 0
-    public IReadOnlyList<T> InsideActionAoe(uint actionId, Placement target, float omenRotate = 0f, float? size = null)
+    // 上游 1646a70 新參數（預設值下結果與舊呼叫完全相同）：castTypeOverride 取代資料表的
+    // CastType（資料表是 Custom 的招式用）；casterHitboxRadius 加長 *2 類 CastType 的距離，
+    // 只在判定原點就是施放者本身位置時傳。
+    public IReadOnlyList<T> InsideActionAoe(uint actionId, Placement target, float omenRotate = 0f, float? size = null,
+        CastType? castTypeOverride = null, float casterHitboxRadius = 0f)
     {
         var actionSheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>();
         if (!actionSheet.TryGetRow(actionId, out var action))
@@ -246,10 +251,12 @@ public sealed class CharacterFind<T> where T : IPositioned
             return Array.Empty<T>();
         }
         HitRangeDebug.NextLabel = $"{actionId} {action.Name}";
-        var range = (float)action.EffectRange;
-        var halfWidth = action.XAxisModifier > 0 ? action.XAxisModifier * 0.5f : range;
+        var castType = castTypeOverride is { } overridden ? (byte)overridden : action.CastType;
+        var sheetRange = (float)action.EffectRange;
+        var range = sheetRange + (((CastType)castType).AddsCasterHitbox() ? casterHitboxRadius : 0f);
+        var halfWidth = action.XAxisModifier > 0 ? action.XAxisModifier * 0.5f : sheetRange;
         var forward = new Placement(target.Position, target.Rotation + omenRotate);
-        var hits = action.CastType switch
+        var hits = castType switch
         {
             2 or 5 or 6 // Probably different targeting: ground / caster / target. Doesn't matter for us
                   => InsideCircle(target.Position, size ?? range), // size = 半徑覆寫（判定容差用）
@@ -264,7 +271,7 @@ public sealed class CharacterFind<T> where T : IPositioned
             11  // +
                   => InsideCross(forward, halfWidth, range),
             _ =>
-                LogUnknownCastType(actionId, action.CastType),
+                LogUnknownCastType(actionId, castType),
         };
         return SortByDistanceTo(hits, target.Position);
     }
@@ -335,11 +342,57 @@ public sealed class CharacterFind<T> where T : IPositioned
 // exactly one place (Run), so any parameter it grows is carried to both callers
 // automatically — the debug picture can't drift from the resolved AOE.
 public readonly struct AoeQuery(uint actionId, Placement source,
-    float omenRotate = 0f, float? size = null)
+    float omenRotate = 0f, float? size = null, CastType? castTypeOverride = null, float casterHitboxRadius = 0f)
 {
+    public uint ActionId { get; } = actionId;
     public Placement Source { get; } = source;
+    public float OmenRotate { get; } = omenRotate;
+    public float? Size { get; } = size;
+    public CastType? CastTypeOverride { get; } = castTypeOverride;
+    public float CasterHitboxRadius { get; } = casterHitboxRadius;
 
     public IReadOnlyList<T> Run<T>(CharacterFind<T> find) where T : IPositioned =>
-        find.InsideActionAoe(actionId, Source, omenRotate, size);
+        find.InsideActionAoe(ActionId, Source, OmenRotate, Size, CastTypeOverride, CasterHitboxRadius);
+
+    // 上游 1646a70：Yalms from `point` to the AOE's edge on the XZ plane: negative inside, positive
+    // outside. Mirrors InsideActionAoe's shape dispatch; null when the action or its CastType is unknown.
+    public float? SignedDistance(Vector3 point)
+    {
+        if (ActionLookup.Row(ActionId) is not { } action) return null;
+        var castType = CastTypeOverride ?? action.CastType;
+        var halfWidth = action.XAxisModifier > 0 ? action.XAxisModifier * 0.5f : action.EffectRange;
+        var range = action.EffectRange + (castType.AddsCasterHitbox() ? CasterHitboxRadius : 0f);
+        var rotation = Source.Rotation + OmenRotate;
+        var dx = point.X - Source.Position.X;
+        var dz = point.Z - Source.Position.Z;
+        var fwd = dx * MathF.Sin(rotation) + dz * MathF.Cos(rotation);
+        var side = dx * MathF.Cos(rotation) - dz * MathF.Sin(rotation);
+        var dist = MathF.Sqrt(dx * dx + dz * dz);
+        return castType switch
+        {
+            CastType.Circle or CastType.Circle2 or CastType.Custom => dist - (Size ?? range),
+            CastType.Cone2 or CastType.Cone => ConeDistance(fwd, side, dist, Size ?? MathF.PI / 6f, range),
+            CastType.Charge => BoxDistance(fwd - (Size ?? 100f) / 2f, side, (Size ?? 100f) / 2f, halfWidth),
+            CastType.Rectangle2 or CastType.Rectangle => BoxDistance(fwd - range / 2f, side, range / 2f, halfWidth),
+            CastType.Donut => MathF.Max(dist - range, (Size ?? 0f) - dist),
+            CastType.Cross => MathF.Min(BoxDistance(fwd, side, range, halfWidth), BoxDistance(fwd, side, halfWidth, range)),
+            _ => null,
+        };
+    }
+
+    private static float BoxDistance(float alongX, float alongY, float halfX, float halfY)
+    {
+        var qx = MathF.Abs(alongX) - halfX;
+        var qy = MathF.Abs(alongY) - halfY;
+        var outside = MathF.Sqrt(MathF.Max(qx, 0f) * MathF.Max(qx, 0f) + MathF.Max(qy, 0f) * MathF.Max(qy, 0f));
+        return outside + MathF.Min(MathF.Max(qx, qy), 0f);
+    }
+
+    private static float ConeDistance(float fwd, float side, float dist, float halfAngle, float range)
+    {
+        var angle = MathF.Atan2(MathF.Abs(side), fwd);
+        var toEdgeRay = angle - halfAngle >= MathF.PI / 2f ? dist : dist * MathF.Sin(angle - halfAngle);
+        return MathF.Max(dist - range, toEdgeRay);
+    }
 }
 

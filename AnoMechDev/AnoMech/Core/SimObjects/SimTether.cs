@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using AnoMech.Core.Game;
 using AnoMech.Core.Native;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 
@@ -24,7 +25,8 @@ namespace AnoMech.Core.SimObjects;
 // our own ClearTether against the new SetTether.
 //
 // Distance / endpoint-death break logic lives in the owning scenario — SimTether
-// only renders the visual and ticks expiry.
+// only renders the visual and ticks expiry. Expiry raises TetherEnded(Expired); a
+// scenario's own Despawn raises nothing.
 public sealed unsafe class SimTether : ISimObject
 {
     private const byte Slot = 0;
@@ -42,6 +44,7 @@ public sealed unsafe class SimTether : ISimObject
     private SimCharacter? currentTarget;
     private ConditionalStatus? conditionalStatus;
     private bool autoFaceTarget;
+    private readonly SimEvents? events;
 
     public ushort TetherId { get; }
     public byte Progress { get; }
@@ -61,8 +64,9 @@ public sealed unsafe class SimTether : ISimObject
         A is { } a && B is { } b && Vector3.DistanceSquared(a.Position, b.Position) < distance * distance;
 
     internal SimTether(ITetherEnd from, ITetherEnd to, TetherContext ctx, ushort debuffStatusId, float duration,
-        byte progress = 1)
+        SimEvents? events, byte progress = 1)
     {
+        this.events = events;
         this.from = from;
         this.to = to;
         this.ctx = ctx;
@@ -102,6 +106,7 @@ public sealed unsafe class SimTether : ISimObject
                 }
                 ClearTetherVfxIfOwned();
                 active = false;
+                events?.Raise(new TetherEnded(this, TetherEndReason.Expired));
                 return;
             }
         }

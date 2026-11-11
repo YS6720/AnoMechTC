@@ -25,6 +25,8 @@ namespace AnoMech.Core.Native;
 // PlayerMovementOverride.cs / ActionManagerEx.cs (which themselves credit
 // awgil's vnavmesh + bossmod). If a future patch breaks a sig, both projects
 // will need to rev them together.
+// 國際服（2026.10.16）兩個 sig 同字串、皆唯一命中（RMIWalk→RVA 0x182D790、
+// CheckStrafeKeybind→0x634CB0）；RMIWalk 與上游 master 同字串、Strafe 與 fork 點 v0.3.12.0 同字串。
 public sealed unsafe class LocalPlayerInputHooks : IDisposable
 {
 

@@ -46,8 +46,8 @@ public unsafe class MainWindow : Window, IDisposable
     internal string SelectedProgressKey => _selectedProgressKey;
     private string _selectedProgressKey = "full";
 
-    // Cached on scenario selection; every label retains its original AiStrats index.
-    private string[] _stratLabels = [];
+    // 地區按鈕目前選的地區（D800 a，上游 1646a70 _selectedStratGroup）；沒有分組的場景為 null。
+    private string? _selectedStratGroup;
 
     // Presentation only: indices remain the original PartyRole slots.
     private static readonly string[] RoleLabels =
@@ -304,9 +304,48 @@ public unsafe class MainWindow : Window, IDisposable
             ? progress.Progresses[0].Key : "full";
         _selectedStrat = 0;
         _selectedWaymark = 0;
-        _stratLabels = BuildStratLabels(scenario.AiStrats);
+        _selectedStratGroup = null;
+        ReconcileStrat();
     }
 
+    // 上游 1646a70 MainWindow.StratGroups：各打法 IScenarioAi.Group 的地區，依出現順序去重；空＝不分組。
+    private static List<string> StratGroups(IScenario scenario)
+    {
+        var groups = new List<string>();
+        foreach (var ai in scenario.AiStrats)
+            if (ai.Group is { } g && !groups.Contains(g)) groups.Add(g);
+        return groups;
+    }
+
+    // 上游 ReconcileStrat：_selectedStrat 維持 AiStrats 的絕對索引（RunScenario 吃這個）。分組場景
+    // 選到的打法不在目前地區時換成該地區第一支，地區沒有打法時為 -1。
+    private void ReconcileStrat()
+    {
+        if (_selectedScenario is not { } scenario) return;
+        var strats = scenario.AiStrats;
+        var groups = StratGroups(scenario);
+        if (groups.Count == 0)
+        {
+            if (strats.Count > 1) _selectedStrat = Math.Clamp(_selectedStrat, 0, strats.Count - 1);
+            return;
+        }
+        if (_selectedStratGroup is null || !groups.Contains(_selectedStratGroup)) _selectedStratGroup = groups[0];
+        var inRegion = RegionStrats(strats);
+        if (inRegion.Count == 0) _selectedStrat = -1;
+        else if (!inRegion.Contains(_selectedStrat)) _selectedStrat = inRegion[0];
+    }
+
+    // 上游 RegionStrats 只列該地區；我方另把沒標地區的打法（例如 TOP P5 的 Standard）列進每個地區，
+    // 免得分組後選不到（09-13 複審 F1 拿掉地區過濾的原因）。
+    private List<int> RegionStrats(IReadOnlyList<IScenarioAi> strats)
+    {
+        var inRegion = new List<int>();
+        for (var i = 0; i < strats.Count; i++)
+            if (strats[i].Group is null || strats[i].Group == _selectedStratGroup) inRegion.Add(i);
+        return inRegion;
+    }
+
+    // 連戰清單的打法下拉（不分地區、一支一列）：同名打法才在名稱後補地區。
     private static string[] BuildStratLabels(IReadOnlyList<IScenarioAi> strats)
     {
         var labels = new string[strats.Count];
@@ -367,6 +406,37 @@ public unsafe class MainWindow : Window, IDisposable
             }
         }
 
+        if (_selectedScenario.HasPerPlayerSettings)
+            DrawPerPlayerSettingsButton(_selectedScenario,
+                plugin.Multiplayer.HasSession && plugin.Multiplayer.Session?.IsHost != true);
+    }
+
+    private const string PerPlayerPopupId = "個人設定###AnoMechAssignMechanics";
+
+    // 上游 1646a70 Windows/MultiplayerUi.cs DrawAssignMechanicsButton 的對話框：某位玩家拿到哪個
+    // 機制（號碼、Accretion、連線）和全場隨機是不同問題，所以另開對話框（D790 a）。
+    // 成員端與場景設定區一樣停用：只採用房主的設定。
+    private static void DrawPerPlayerSettingsButton(IScenario scenario, bool locked)
+    {
+        ImGui.Spacing();
+        ImGui.BeginDisabled(locked);
+        if (ImGui.Button("個人設定：指定各玩家的機制")) ImGui.OpenPopup(PerPlayerPopupId);
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip(locked
+                ? "多人時只採用房主的設定。"
+                : $"指定 {scenario.Name} 中每位玩家拿到的機制；留在「自動」的照副本本身隨機。");
+
+        if (!ImGui.BeginPopup(PerPlayerPopupId)) return;
+        ImGui.TextUnformatted($"{scenario.Name}：各玩家的機制");
+        ImGui.TextDisabled(PerRole.SeatsActive
+            ? "先選座位，再選該玩家拿到什麼；留在「自動」的照副本本身隨機。"
+            : "只影響你自己；留在「自動」的照副本本身隨機。");
+        ImGui.Separator();
+        scenario.DrawPerPlayerSettings();
+        ImGui.Separator();
+        if (ImGui.Button("完成")) ImGui.CloseCurrentPopup();
+        ImGui.EndPopup();
     }
 
     private static void DrawScenarioStatus(Game game)
@@ -742,17 +812,56 @@ public unsafe class MainWindow : Window, IDisposable
         ImGui.TextDisabled("僅選擇練習分工，不切換實際職業；下次開始生效。");
     }
 
-    // Only meaningful when a scenario offers more than one strat; hidden otherwise.
-    // When the scenario declares StratGroups, a region-button row is drawn above the
-    // dropdown and the dropdown is filtered to the selected region.
+    // 只有一支打法且不分地區時不畫。打法有標地區時，上方畫地區按鈕，下拉只列該地區的打法
+    // ＋沒標地區的打法（上游 1646a70 DrawGroupedStratSelector，D800 a）。
     private void DrawStratSelector()
     {
-        if (_selectedScenario is null || _stratLabels.Length <= 1) return;
-        _selectedStrat = Math.Clamp(_selectedStrat, 0, _stratLabels.Length - 1);
+        if (_selectedScenario is not { } scenario) return;
+        var strats = scenario.AiStrats;
+        var groups = StratGroups(scenario);
+        if (groups.Count == 0)
+        {
+            if (strats.Count <= 1) return;
+            var labels = new string[strats.Count];
+            for (var i = 0; i < strats.Count; i++) labels[i] = strats[i].Name;
+            ImGui.TextUnformatted("打法：");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(280);
+            ImGui.Combo("##strat", ref _selectedStrat, labels, labels.Length);
+            return;
+        }
+
+        ImGui.TextUnformatted("地區：");
+        for (var i = 0; i < groups.Count; i++)
+        {
+            ImGui.SameLine();
+            var group = groups[i];
+            var selected = _selectedStratGroup == group;
+            if (selected) ImGui.PushStyleColor(ImGuiCol.Button, ImGui.GetColorU32(ImGuiCol.ButtonActive));
+            ImGui.PushID($"region{i}");
+            if (ImGui.Button(group))
+            {
+                _selectedStratGroup = group;
+                ReconcileStrat();
+            }
+            ImGui.PopID();
+            if (selected) ImGui.PopStyleColor();
+        }
+
+        var filtered = RegionStrats(strats);
         ImGui.TextUnformatted("打法：");
         ImGui.SameLine();
+        if (filtered.Count == 0)
+        {
+            ImGui.TextDisabled("（這個地區還沒有打法）");
+            return;
+        }
+        var localIdx = filtered.IndexOf(_selectedStrat);
+        var regionLabels = new string[filtered.Count];
+        for (var i = 0; i < filtered.Count; i++) regionLabels[i] = strats[filtered[i]].Name;
         ImGui.SetNextItemWidth(280);
-        ImGui.Combo("##strat", ref _selectedStrat, _stratLabels, _stratLabels.Length);
+        if (ImGui.Combo("##strat", ref localIdx, regionLabels, regionLabels.Length))
+            _selectedStrat = filtered[localIdx];
     }
 
     // 防火牆自檢狀態（紅線 1）。刻意畫在 Start 正上方而不是塞進設定分頁：
@@ -820,12 +929,15 @@ public unsafe class MainWindow : Window, IDisposable
         RecorderPanel.Draw(Plugin.Recorder);
     }
 
-    // Empty AiStrats uses the built-in default; otherwise preserve the selected absolute index.
+    // Empty AiStrats uses the built-in default; grouped scenarios need a strat listed in the
+    // active region (上游 HasStartableStrat；沒標地區的打法在每個地區都算).
     private bool HasStartableStrat()
     {
         if (_selectedScenario is not { } scenario) return false;
         var strats = scenario.AiStrats;
-        return strats.Count == 0 || (uint)_selectedStrat < strats.Count;
+        if (strats.Count == 0) return true;
+        if ((uint)_selectedStrat >= strats.Count) return false;
+        return StratGroups(scenario).Count == 0 || RegionStrats(strats).Contains(_selectedStrat);
     }
 
     private void DrawLocationHint()

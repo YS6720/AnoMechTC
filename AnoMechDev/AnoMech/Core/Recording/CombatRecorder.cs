@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using AnoMech.Pointers;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
+using FFXIVClientStructs.FFXIV.Client.Game.Network;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Game.ClientState.Objects.Types;
@@ -55,6 +56,8 @@ internal sealed unsafe partial class CombatRecorder : IDisposable
     private readonly Hook<Pointers.VfxObjectPointers.UpdateDelegate>? staticVfxUpdateHook;
     private Hook<CleanupRenderDelegate>? staticVfxCleanupHook;
     private readonly Hook<Pointers.VfxContainerPointers.SetTetherDelegate>? tetherHook;
+    // NPC 台詞經伺服器層轉接（API 13 與 API 15 的 IChatGui 委派不同，見 Compat/Server）。
+    private readonly AnoMech.Compat.Server.ServerChatEvents chatEvents;
 
     // ActionEffect＝招式**實際落下**。瞬發技（無詠唱條）永遠不會經過 HandleActorCastPacket，
     // 只有這條路徑才錄得到。2026-08-19 實證：牙尾連旋讀完後真正造成傷害的
@@ -191,12 +194,12 @@ internal sealed unsafe partial class CombatRecorder : IDisposable
         tetherHook = TryHook(Pointers.VfxContainerPointers.SetTether, TetherDetour, nameof(tetherHook));
         // NPC 戰鬥台詞（2026-08-21 盤點補）：boss 喊話常是機制預告（「聚集吧——」），
         // 復刻演出要有。只收 NPC 對話類，玩家聊天一個字都不碰（隱私＋雜訊）。
-        Plugin.ChatGui.ChatMessage += OnChatMessage;
+        chatEvents = new AnoMech.Compat.Server.ServerChatEvents(Plugin.ChatGui, OnChatMessage);
     }
 
-    private void OnChatMessage(Dalamud.Game.Text.XivChatType type, int timestamp,
-                               ref Dalamud.Game.Text.SeStringHandling.SeString sender,
-                               ref Dalamud.Game.Text.SeStringHandling.SeString message, ref bool isHandled)
+    private void OnChatMessage(Dalamud.Game.Text.XivChatType type,
+                               Dalamud.Game.Text.SeStringHandling.SeString sender,
+                               Dalamud.Game.Text.SeStringHandling.SeString message)
     {
         try
         {
@@ -915,11 +918,11 @@ internal sealed unsafe partial class CombatRecorder : IDisposable
                 WriteHook("spawn", "spawnobj",
                     $"\"baseId\":{packet->BaseId},\"entity\":{packet->EntityId},"
                   + $"\"index\":{packet->ObjectIndex},\"fateId\":{packet->FateId},"
-                  + $"\"kind\":{packet->ObjectKind},\"state\":{packet->TimelineState},"
+                  + $"\"kind\":{packet->ObjectKind},\"state\":{AnoMech.Compat.Server.ServerInterop.SpawnTimelineState(packet)},"
                   + $"\"eventState\":{packet->EventState},\"radius\":{F(packet->Radius)},"
                   + $"\"owner\":{packet->OwnerId},\"vis\":{packet->Visibility},"
                   + $"\"targetable\":{packet->TargetableStatus},\"layoutId\":{packet->LayoutId},"
-                  + $"\"eventId\":{packet->EventId},\"gimmickId\":{packet->GimmickId},"
+                  + $"\"eventId\":{(uint)packet->EventId},\"gimmickId\":{packet->GimmickId},"
                   + $"\"x\":{F(packet->PositionX)},\"y\":{F(packet->PositionY)},"
                   + $"\"z\":{F(packet->PositionZ)},\"rot\":{packet->Rotation}");
         }
@@ -987,7 +990,7 @@ internal sealed unsafe partial class CombatRecorder : IDisposable
                       + $"\"tid\":[{ids}],\"eff\":[{eff}],"
                       + $"\"tidComplete\":{(targetIds != null || targetCount == 0 ? "true" : "false")},"
                       + $"\"effComplete\":{(effects != null || targetCount == 0 ? "true" : "false")}",
-                        header->ActionType == FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action ? header->ActionId : 0);
+                        (byte)header->ActionType == (byte)FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action ? header->ActionId : 0);
                 }
                 catch { }
             }
@@ -1075,7 +1078,7 @@ internal sealed unsafe partial class CombatRecorder : IDisposable
     public void Dispose()
     {
         Stop();
-        Plugin.ChatGui.ChatMessage -= OnChatMessage;
+        chatEvents.Dispose();
         castHook?.Dispose();
         controlHook?.Dispose();
         actorVfxDtorHook?.Dispose();

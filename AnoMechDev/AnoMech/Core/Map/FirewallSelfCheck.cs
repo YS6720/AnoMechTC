@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using AnoMech.Compat.Server;
 
 namespace AnoMech.Core.Map;
 
@@ -23,6 +24,10 @@ namespace AnoMech.Core.Map;
 //     台服抓不到 opcode 表（上游只有國際服版本檔），清單必然為空；但空清單是安全的，
 //     只是假副本可能收不到某些 client 端狀態。故降為警告——把它當硬閘等於為零安全
 //     收益封死整個台服使用。真要補 opcode 是功能問題（B-006），不是安全問題。
+//
+//   國際服例外：ZoneDown allowlist 非空升為安全項（ServerFirewall.ZoneDownAllowlistRequired）。
+//     Hyperborea 有國際服當前版本的 opcode 檔，清單為空只會是下載失敗、版本檔未發布或
+//     釘選 commit 過舊——都代表 opcode 表與當前 client 對不上，一律拒絕進場。
 internal enum FirewallSeverity { Safety, Functional }
 
 internal sealed record FirewallCheckItem(
@@ -109,15 +114,17 @@ internal static class FirewallSelfCheck
             leak == 0 ? "0" : $"偵測到 {leak} 筆非心跳封包走到 Original——detour 邏輯已被破壞",
             FirewallSeverity.Safety));
 
-        // ── 功能項（不擋，只警告）──────────────────────────────────
+        // ── allowlist：台服為功能項（不擋，只警告）；國際服為安全項 ──────────
         var opcodeCount = session.IncomingOpcodes.Count;
         items.Add(new FirewallCheckItem(
             "ZoneDown allowlist 非空",
             opcodeCount > 0,
             opcodeCount > 0
                 ? $"{opcodeCount} 筆"
-                : "清單為空——接收全擋是 fail-safe（不洩漏），但假副本可能收不到某些 client 狀態。",
-            FirewallSeverity.Functional));
+                : ServerFirewall.ZoneDownAllowlistRequired
+                    ? "清單為空——國際服必須有 opcode 表（下載失敗、版本檔未發布或釘選過舊），拒絕進場。"
+                    : "清單為空——接收全擋是 fail-safe（不洩漏），但假副本可能收不到某些 client 狀態。",
+            ServerFirewall.ZoneDownAllowlistRequired ? FirewallSeverity.Safety : FirewallSeverity.Functional));
 
         return new FirewallCheckResult(items);
     }

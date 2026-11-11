@@ -1,3 +1,4 @@
+using AnoMech.Compat.Server;
 using AnoMech.Pointers;
 using FFXIVClientStructs.FFXIV.Client.Game.Network;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
@@ -42,8 +43,8 @@ internal static unsafe class EventObjectHelper
             packet->EntityId = 0xE0000000u + 449u + packet->ObjectIndex;
         }
 
-        // 台服 CS 無此函式 ⇒ 走自行 signature-scan 的函式指標（已離線驗證唯一命中）
-        PacketDispatcherPointers.HandleSpawnObjectPacket(0, packet);
+        // 台服走自行 signature-scan 的函式指標、國際服走 CS 自帶函式（見伺服器層）
+        ServerInterop.HandleSpawnObjectPacket(packet);
         slot = packet->ObjectIndex;
         eventObject = EventObjectManagerPointers.GetEventObjectByIndex(manager, (uint)slot);
         return eventObject != null;

@@ -5,6 +5,10 @@ using System.Threading.Tasks;
 
 namespace AnoMech.Core.Map;
 
+// LoadZone 後目前地圖 id 還沒切到預期值（過渡中，國際服 P2 離場實測為 0）時由 completeNative 丟出：
+// 這不是失敗，ZoneRestoration 會每秒重排完成步驟，逾 MaxNotReadyRetries 次才當一般失敗。
+internal sealed class ZoneRestorationNotReadyException(string message) : InvalidOperationException(message);
+
 // Managed ownership and completion ordering for one client-side zone session.
 // Native callbacks are supplied by ZoneSession; this type never owns or clears
 // native recovery data itself.
@@ -26,6 +30,9 @@ internal sealed class ZoneRestoration : IDisposable
     // (about 0.057 degrees), measured on the shortest arc modulo 2*pi.
     private const float RotationToleranceRadians = 0.001f;
 
+    // 完成步驟（LoadZone 後 1 秒）遇到地圖 id 尚未切完時，最多再重排幾次（每次 1 秒，同首次延遲）。
+    internal const int MaxNotReadyRetries = 10;
+
     private readonly object gate = new();
     private readonly Action restoreNative;
     private readonly Action completeNative;
@@ -37,6 +44,7 @@ internal sealed class ZoneRestoration : IDisposable
     private bool completionStarted;
     private bool enterInProgress;
     private Exception? lastError;
+    private int notReadyRetries;
 
     internal ZoneRestoration(
         Action restoreNative,
@@ -115,6 +123,7 @@ internal sealed class ZoneRestoration : IDisposable
                 var ticket = ++generation;
                 phase = Phase.Active;
                 completionStarted = false;
+                notReadyRetries = 0;
                 lastError = null;
 
                 try
@@ -157,6 +166,7 @@ internal sealed class ZoneRestoration : IDisposable
             ticket = ++generation;
             phase = Phase.Pending;
             completionStarted = false;
+            notReadyRetries = 0;
             lastError = null;
             try
             {
@@ -176,6 +186,13 @@ internal sealed class ZoneRestoration : IDisposable
         if (!IsCurrentPending(ticket))
             return;
 
+        QueueCompletion(ticket);
+    }
+
+    // Enqueues one completion callback. Used for the first attempt and for every not-ready retry;
+    // queue failures are observed and become Failed.
+    private void QueueCompletion(long ticket)
+    {
         Task completionTask;
         try
         {
@@ -290,6 +307,7 @@ internal sealed class ZoneRestoration : IDisposable
 
     private void RunCompletion(long ticket)
     {
+        var retry = false;
         lock (gate)
         {
             if (!IsCurrentPendingLocked(ticket) || completionStarted)
@@ -302,19 +320,32 @@ internal sealed class ZoneRestoration : IDisposable
                 // through the native completion that releases isolation.
                 completeNative();
             }
+            catch (ZoneRestorationNotReadyException) when (notReadyRetries < MaxNotReadyRetries)
+            {
+                // 地圖 id 還在過渡中：保持 Pending（隔離不放行），稍後重排；用完次數才落到下面當一般失敗。
+                ++notReadyRetries;
+                completionStarted = false;
+                retry = true;
+            }
             catch (Exception ex)
             {
                 FailPending(ticket, ex);
                 return;
             }
 
-            if (!IsCurrentPendingLocked(ticket))
-                return;
+            if (!retry)
+            {
+                if (!IsCurrentPendingLocked(ticket))
+                    return;
 
-            phase = Phase.Idle;
-            completionStarted = false;
-            lastError = null;
+                phase = Phase.Idle;
+                completionStarted = false;
+                lastError = null;
+                return;
+            }
         }
+
+        QueueCompletion(ticket);
     }
 
     private void ObserveQueueTask(long ticket, Task completionTask)

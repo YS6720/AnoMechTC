@@ -218,5 +218,12 @@ public sealed unsafe class SimNetworkPuppet : SimNpc, ISimPartyMember
         {
             if (parent.Orphaned) base.MoveRecorded(target, duration, finalRotation);
         }
+
+        // B7 起 Follow 是 SimCharacter 的公開 API：連線中的真人不接受 AI 追隨（會變成強制控制遠端玩家），
+        // 離線接管後才開放；解除（null）一律放行。
+        public override void Follow(SimCharacter? target, float speed = 6f)
+        {
+            if (parent.Orphaned || target is null) base.Follow(target, speed);
+        }
     }
 }

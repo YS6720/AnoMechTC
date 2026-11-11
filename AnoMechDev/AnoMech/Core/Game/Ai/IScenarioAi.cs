@@ -13,8 +13,8 @@ public interface IScenarioAi
 {
     string Name { get; }
 
-    // Optional region/group used to distinguish identically named strats in the
-    // main-window picker. It is display metadata, never a filter on available strats.
+    // Optional region/group. When any strat of a scenario declares one, the main window draws
+    // region buttons and lists that region's strats plus every ungrouped strat (D800 a).
     string? Group => null;
 }
 

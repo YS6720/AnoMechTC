@@ -1,3 +1,4 @@
+using AnoMech.Compat.Server;
 using AnoMech.Helpers;
 using AnoMech.Multiplayer;
 using System;
@@ -32,6 +33,16 @@ public sealed class MapController : IDisposable
         public float Radius;
         public int FramesLeft;
     }
+
+    // 上游 1646a70 MapController 的 MapEffect 快照：zone 還沒載好時逐幀重試（上限同 collider drop）。
+    private sealed class PendingSnapshot
+    {
+        public required ushort[] States;
+        public required bool ZoneIn;
+        public int FramesLeft = BarrierDropMaxFrames;
+    }
+
+    private PendingSnapshot? pendingSnapshot;
 
     // ── Zone ─────────────────────────────────────────────────────────────────
 
@@ -69,6 +80,7 @@ public sealed class MapController : IDisposable
         zone.Revert(false);
         IsInInstance = false;
         pendingColliderDrops.Clear();
+        pendingSnapshot = null;
     }
 
     // Per-frame poll. Called from SimWorld.Tick.
@@ -88,6 +100,19 @@ public sealed class MapController : IDisposable
             else
             {
                 pendingColliderDrops[i] = drop;
+            }
+        }
+
+        if (pendingSnapshot != null)
+        {
+            if (!IsInInstance)
+                pendingSnapshot = null;
+            else if (ServerNative.ApplyMapEffectSnapshot(pendingSnapshot.States, pendingSnapshot.ZoneIn))
+                pendingSnapshot = null;
+            else if (--pendingSnapshot.FramesLeft <= 0)
+            {
+                DiagnosticLog.Warn($"[MapEffect] Gave up applying a snapshot after {BarrierDropMaxFrames} frames — zone likely never finished loading.");
+                pendingSnapshot = null;
             }
         }
     }
@@ -170,6 +195,20 @@ public sealed class MapController : IDisposable
     {
         effects.Apply(packetFlags, index);
         NetworkEventSink?.Invoke(new MapEffectEvent(packetFlags, index));
+    }
+
+    // Every slot's resting state in one packet, as the server sends at zone-in and on each reset
+    // (states[i] = slot i). Plays no timeline, so nothing transitions. Replaces a snapshot still
+    // waiting for the zone. 只在副本內做；連線房主與成員各自在開場時呼叫，不經 network sink。
+    public void SetEffectSnapshot(ushort[] states, bool zoneIn = true)
+    {
+        if (!IsInInstance) return;
+        pendingSnapshot = null;
+        if (!ServerNative.ApplyMapEffectSnapshot(states, zoneIn))
+        {
+            DiagnosticLog.Warn("[MapEffect] snapshot not ready yet -- queued for retry.");
+            pendingSnapshot = new PendingSnapshot { States = states, ZoneIn = zoneIn };
+        }
     }
 
     // Replay a native DirectorUpdate event (instance progress / state sync) — the

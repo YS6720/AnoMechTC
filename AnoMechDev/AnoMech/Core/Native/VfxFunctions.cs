@@ -1,4 +1,5 @@
 using AnoMech.Compat;
+using AnoMech.Compat.Server;
 using AnoMech.Core.Game;
 using AnoMech.Pointers;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
@@ -118,9 +119,8 @@ internal static unsafe class VfxFunctions
     {
         var sheet = Plugin.DataManager.GetExcelSheet<Lockon>();
         if (!sheet.TryGetRow(lockonId, out var row)) return null;
-        // 台服 Lumina 尚未替 Lockon 的欄位命名：Unknown0 ＝ 國際服的 IconName。
-        // 依據：兩版欄位順序相同（RowId, [此欄], Unknown1），國際服該位置名為 IconName。
-        var iconName = row.Unknown0.ExtractText();
+        // 台服 Lumina 此欄未命名（Unknown0）、國際服名為 IconName；對照依據見伺服器層。
+        var iconName = ServerInterop.LockonIconName(row).ExtractText();
         if (string.IsNullOrEmpty(iconName)) return null;
         return iconName;
     }

@@ -40,7 +40,8 @@ internal sealed unsafe class MapEffects : IDisposable
         return hook.Original(module, index, state, flags);
     }
 
-    // packetFlags: high16=State, low8=Flags (ACT type-257 raw value).
+    // packetFlags: high16=State, low8=Flags (ACT type-257 raw value)；上游新編碼的值先經
+    // MapEffectEncoding.FromPacket 轉換。
     internal void Apply(uint packetFlags, byte index)
     {
         // 失敗要看得見（P3 地板追查 2026-08-20）：兩個靜默 no-op 分支都留痕。
@@ -55,8 +56,9 @@ internal sealed unsafe class MapEffects : IDisposable
             Core.CrashTrace.Log($"[MapEffect] Apply 被擋：ActiveContentDirector=null（idx={index}）");
             return;
         }
-        Core.CrashTrace.Log($"[MapEffect] Apply idx={index} state=0x{packetFlags >> 16:X} flags=0x{packetFlags & 0xFF:X}");
-        hook.Original(module, index, (ushort)(packetFlags >> 16), (ushort)(packetFlags & 0xFF));
+        var (state, flags) = MapEffectEncoding.Decode(packetFlags);
+        Core.CrashTrace.Log($"[MapEffect] Apply idx={index} state=0x{state:X} flags=0x{flags:X}");
+        hook.Original(module, index, state, flags);
     }
 
     public void Dispose()

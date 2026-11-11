@@ -37,7 +37,27 @@ internal class Movement(SimCharacter parent)
     // TimedMotion（唯一來源，離線可驗）。
     private TimedMotion? recorded;
 
+    // 上游 1646a70 KeepFacing：不在移動、不在動作鎖定時每 tick 轉向它；null 或目標死了就放掉。
+    private SimCharacter? keepFacingTarget;
+
+    // 強制位移（carry）期間不派送、也不推進一般移動，免得和原生 warp 搶位置；到期自動恢復。
+    private float holdRemaining;
+
     public bool IsMoving => destination != null || recorded != null;
+    // 上游 1646a70 Navigator 的 Destination／IsIntercepting 概念（只補唯讀，不換 Motion）。
+    // 差異：我方擊退也設 destination，擊退中讀到的是擊退終點。
+    public Vector3? Destination => destination;
+    public bool IsIntercepting => interceptTether != null;
+    // carry（強制位移）落定前為真；上游 Motion.IsForcedMoving 的對應（混亂追擊在這段期間不重新下令）。
+    public bool IsHeld => holdRemaining > 0f;
+
+    public void KeepFacing(SimCharacter? target) => keepFacingTarget = target;
+
+    public void Hold(float seconds)
+    {
+        Stop();
+        holdRemaining = MathF.Max(holdRemaining, seconds);
+    }
 
     public virtual void MoveTo(Vector3 t, float sp = 6f, float? finalRot = null, ushort tl = RunTimelineId, bool baseOverride = true)
         => InternalMoveTo(t, sp, finalRot, tl, baseOverride);
@@ -65,7 +85,7 @@ internal class Movement(SimCharacter parent)
         if (!animActive && !parent.AnimationLock && recorded.HasHorizontalTravel) StartAnim();
     }
 
-    public void Follow(SimCharacter? target, float speed = 6f)
+    public virtual void Follow(SimCharacter? target, float speed = 6f)
     {
         if (!target.IsAlive())
         {
@@ -160,7 +180,7 @@ internal class Movement(SimCharacter parent)
         Vector3 moveDestination, float sp = 6f, float? finalRot = null, ushort tl = RunTimelineId, bool baseOverride = true,
         bool faceTravel = true, bool avoid = true, bool preserveTracking = false)
     {
-        if (!parent.IsAlive()) return;   // dead characters don't move
+        if (!parent.IsAlive() || holdRemaining > 0f) return;   // dead or carried characters don't move
         // A new dodge or knockback supersedes the previous chase. Internal tracking
         // updates keep their target and still use the virtual player movement gate.
         if (!internalReissue && !preserveTracking)
@@ -183,6 +203,11 @@ internal class Movement(SimCharacter parent)
 
     public void Tick(float deltaSeconds)
     {
+        if (holdRemaining > 0f)
+        {
+            holdRemaining = MathF.Max(0f, holdRemaining - deltaSeconds);
+            return;
+        }
         // 錄影回放與一般 locomotion 互斥，不吃 follow／intercept／避障，而且
         // **依錄影時間推進**：動畫鎖定（讀條／釋放）只抑制跑步動畫，位置不能因此
         // 停表偏離已觀測軌跡。
@@ -195,6 +220,11 @@ internal class Movement(SimCharacter parent)
         {
             StopAnim();
             return;
+        }
+        if (keepFacingTarget is { } facing)
+        {
+            if (!facing.IsAlive()) keepFacingTarget = null;
+            else if (!IsMoving) Face(facing.Position);
         }
 
         TickFollow(deltaSeconds);
@@ -331,15 +361,21 @@ internal class Movement(SimCharacter parent)
     }
 }
 
-internal sealed class PlayerMovement(SimCharacter parent) : Movement(parent)
+internal sealed class PlayerMovement(SimCharacter parent, Action<Vector3> scriptedMove) : Movement(parent)
 {
     public override void MoveTo(Vector3 t, float sp = 6f, float? finalRot = null, ushort tl = RunTimelineId, bool baseOverride = true)
     {
-        // NO-OP - player cannot be moved like this
+        // 玩家不能被這樣移動；打法下的目的地只交給引導線（場景座標）。
+        scriptedMove(t);
     }
 
     public override void MoveRecorded(Vector3 target, float duration, float? finalRot = null)
     {
         // NO-OP - the player's own position is never replayed
+    }
+
+    public override void Follow(SimCharacter? target, float speed = 6f)
+    {
+        // NO-OP - an AI follow order never walks the player; a mechanic uses SimCharacter.ForceFollow
     }
 }

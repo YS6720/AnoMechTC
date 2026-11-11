@@ -56,10 +56,11 @@ public sealed class ObstacleField
     // reachable edge point instead of an unreachable center the bot orbits
     // forever. Single-pass / single-obstacle: with overlapping obstacles the
     // result may still sit inside another (acceptable; best-effort by design).
-    public Vector2 ClampOutside(Vector2 p)
+    // margin（上游 1646a70 同名）：額外保留的離邊距離，0＝貼邊界。
+    public Vector2 ClampOutside(Vector2 p, float margin = 0f)
     {
-        if (Deepest(p, out var dist, out var normal) == null || dist >= 0f) return p;
-        return p - normal * dist;   // dist < 0, normal outward -> move out by |dist|
+        if (Deepest(p, out var dist, out var normal) == null || dist >= margin) return p;
+        return p - normal * (dist - margin);   // dist < margin, normal outward -> push out to margin clearance
     }
 
     // Nearest point to the projection `t0` on segment a->b (param clamped to

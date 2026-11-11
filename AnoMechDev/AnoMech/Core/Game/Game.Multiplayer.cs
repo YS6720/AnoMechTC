@@ -247,10 +247,19 @@ public sealed partial class Game
         var phase = scenario.Phase;
         var zone = phase.Zone;
         EnsureNetworkScope(isCurrent);
+        // 上游 1646a70 InstanceSession：每輪開場送副本 MapEffect 快照（合併本 phase 的覆寫）；房主與成員各自送。
+        if (zone.DutyInitData.MapEffectSnapshot.Count > 0)
+            World.Map.SetEffectSnapshot(zone.DutyInitData.ArenaMapEffects(phase.ArenaMapEffectOverrides), prepared.FreshLoad);
         if (!peer)
         {
             // Peer never creates an arena-death fence or schedules mechanics.
-            CrashTrace.Log("L: zone.Run");
+            // 上游 1646a70 ScenarioSession.Start：每輪換種子、執行中的場景收世界事件（成員端不收）。
+            var seed = Random.Shared.Next();
+            World.Reseed(seed);
+            World.SimEvents.Listener = scenario;
+            // 上游 ScenarioSession.Start 同序：副本的隱形 helper 池在 zone.Run 前生成。
+            World.SpawnHelperPool(zone.DutyInitData.HelperPool);
+            CrashTrace.Log($"L: seed={seed}；zone.Run");
             zone.Run(World);
             EnsureNetworkScope(isCurrent);
             CrashTrace.Log("M: phase.Run");

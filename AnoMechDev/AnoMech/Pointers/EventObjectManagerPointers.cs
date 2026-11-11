@@ -12,6 +12,7 @@ internal unsafe class EventObjectManagerPointers
     // check，台服 binary 內 3 處命中（另 2 處是別的函式裡的 16-bit 66 83 FA 27）；
     // ScanText 取最低位址＝錯函式 ⇒ 塔/地面圈生成壞掉。延長到真函式獨特尾段
     // （movsxd rax,edx / mov rax,[rcx+rax*8+0x10]）後唯一命中（RVA 0x1634D80）。
+    // 國際服（2026.10.16）：此 sig 唯一命中 RVA 0x175C0C0，與上游 master 原 sig 命中同一位址。
     [Signature("83 FA 27 77 09 48 63 C2 48 8B 44 C1 10", UseFlags = SignatureUseFlags.Pointer, ScanType = ScanType.Text)]
     public static GetEventObjectByIndexDelegate GetEventObjectByIndex { get; private set; } = null!;
 

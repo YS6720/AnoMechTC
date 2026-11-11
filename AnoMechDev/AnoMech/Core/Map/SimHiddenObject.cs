@@ -1,3 +1,4 @@
+using AnoMech.Compat.Server;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using AnoMech.Core.SimObjects;
 
@@ -37,8 +38,8 @@ public sealed unsafe class SimHiddenObject : ISimObject
             if (go.BaseId != baseId) continue;
             var obj = (GameObject*)go.Address;
             obj->DisableDraw();
-            // 台服 CS 的 RenderFlags 是 int（國際服已改成 VisibilityFlags enum）⇒ 顯式轉型
-            obj->RenderFlags |= (int)(VisibilityFlags.Model | VisibilityFlags.Nameplate);
+            // RenderFlags：台服 CS 是 int、國際服是 VisibilityFlags enum ⇒ 經伺服器層轉成欄位型別
+            obj->RenderFlags |= ServerInterop.RenderFlags(VisibilityFlags.Model | VisibilityFlags.Nameplate);
             return new SimHiddenObject(go.ObjectIndex, baseId);
         }
         return null;
@@ -54,7 +55,7 @@ public sealed unsafe class SimHiddenObject : ISimObject
         var obj = Lookup();
         if (obj != null)
         {
-            obj->RenderFlags &= ~(int)(VisibilityFlags.Model | VisibilityFlags.Nameplate);
+            obj->RenderFlags &= ~ServerInterop.RenderFlags(VisibilityFlags.Model | VisibilityFlags.Nameplate);
             obj->EnableDraw();
         }
         hidden = false;

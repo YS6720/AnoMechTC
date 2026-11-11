@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
+using AnoMech.Core.EnemyActions;
+using AnoMech.Core.Combat;
 using AnoMech.Core.Game;
 using AnoMech.Core.Game.Party;
 
@@ -23,10 +26,44 @@ public sealed class SimParty : ISimObject
     public static readonly SimParty Empty = new();
 
     private readonly SimCharacter?[] slots = new SimCharacter?[8];
+    private readonly SimWorld? world;
 
-    public SimParty() { Find = new CharacterFind<SimCharacter>(ActiveMembers); }
+    public SimParty() : this(null) { }
+
+    // world 供 LimitBreak 轉接場景的練習 LB runtime；Empty 沒有 world，LimitBreak.Set 為 no-op。
+    internal SimParty(SimWorld? world)
+    {
+        this.world = world;
+        Find = new CharacterFind<SimCharacter>(ActiveMembers);
+        LimitBreak = new LimitBreakGauge(world);
+    }
 
     public CharacterFind<SimCharacter> Find { get; }
+
+    // 上游 1646a70 同名：場景用 Party.LimitBreak.Set(bars) 設定練習 LB 量表。
+    public LimitBreakGauge LimitBreak { get; }
+
+    // 上游 1646a70 同名：The bot in `role` casts its job's limit break, emptying the gauge. False if
+    // the slot is not a live bot (humans press their own), mitigation is not required (上游 bot 出招同一閘),
+    // the practice gauge is not ready, or the job has no usable LB. 我方只有 LB3：量表、施放、坦 LB 減傷與
+    // 扣量表全走既有練習 LB runtime（與玩家按 LB 同一個保留，不會重複扣）；職業 LB 取 ClassJob.LimitBreak3。
+    public bool UseLimitBreak(PartyRole role)
+    {
+        if (Get(role) is not SimPartyNpc bot || !bot.IsAlive() || !UserActions.Mitigation.Required) return false;
+        if (world?.LimitBreaks is not { IsAvailable: true } runtime || runtime.IsBusy(role)) return false;
+        var actionId = runtime.ActionFor(role);
+        if (actionId == 0 ||
+            Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().GetRowOrDefault(actionId) is not { TargetArea: false })
+            return false;
+        // 同 TOP P6 既有 bot LB：補位職（坦／治療）以自己為目標，輸出職不指定目標。
+        var support = role is PartyRole.MainTank or PartyRole.OffTank or PartyRole.RegenHealer or PartyRole.ShieldHealer;
+        return runtime.TryStart(role, actionId, target: support ? bot : null);
+    }
+
+    // 上游 1646a70 同名：Whether a seat is played by AI here. 連線替身由遠端真人操作，一律 false
+    //（我方沒有上游的 DebugBotControl 與遠端 bot 座位）。
+    public bool IsBotDriven(SimCharacter member)
+        => member is not SimNetworkPuppet && !ReferenceEquals(member, Player);
 
     public SimCharacter? Get(int roleId)
         => roleId >= 0 && roleId < slots.Length ? slots[roleId] : null;
@@ -164,8 +201,59 @@ public sealed class SimParty : ISimObject
     // to IsAlive.
     public bool IsActive => true;
 
+    // 上游 1646a70 同名：Each confused member's current chase target, null while held.
+    private readonly Dictionary<SimCharacter, SimCharacter?> confusedChases = new();
+    // 隊員施放 EnemyAction（混亂揮擊）用的 handler；我方隊員沒有常駐 SimCast，同練習 LB runtime 依需要建立。
+    private readonly Dictionary<SimCharacter, EnemyActionHandler> actionHandlers = new();
+
+    // The server walks a confused player after their nearest live ally, retargeting as that
+    // changes, for as long as its last ActorControl 0x52 said Confused. Whenever an ally stands in
+    // the swing and nothing locks it, the confused player swings at them.
+    private void TickConfusedChases()
+    {
+        foreach (var member in AllMembers())
+        {
+            if (!member.IsAlive() || !member.ActorControl.Confused)
+            {
+                if (confusedChases.Remove(member)) member.ForceFollow(null);
+                continue;
+            }
+            // 上游另要求 !member.Casting.IsBusy；我方隊員沒有常駐 SimCast，揮擊硬直改由 HoldConfusedChase 擋。
+            if (!member.ConfusedChaseHeld && Find.Closest(member.Position, member) is { } nearest)
+                SwingIfInReach(member, nearest);
+            var target = member.ConfusedChaseHeld ? null : Find.Closest(member.Position, member);
+            if (confusedChases.TryGetValue(member, out var current) && ReferenceEquals(current, target)) continue;
+            confusedChases[member] = target;
+            member.ForceFollow(target);
+        }
+    }
+
+    // D788（我方）：暫停時 Tick 不跑，原生 forced-follow 卻會自己繼續拖本機玩家。停掉每個追擊並清掉快取，
+    // 恢復那一幀 TickConfusedChases 就會把仍混亂的人重新派出去（同一個目標也會重送）。每個暫停幀都可呼叫。
+    internal void SuspendConfusedChases()
+    {
+        if (confusedChases.Count == 0) return;
+        foreach (var member in confusedChases.Keys) member.ForceFollow(null);
+        confusedChases.Clear();
+    }
+
+    // The swing aimed at `nearest`, as it would resolve; the chase stands still for its lock.
+    private void SwingIfInReach(SimCharacter member, SimCharacter nearest)
+    {
+        if (world is null) return;
+        var attack = CommonActions.ConfusedAttack;
+        var aim = member.Placement().Face(nearest.Position);
+        var query = new AoeQuery(attack.ActionId, aim, attack.Cast.Rotation, attack.Area.Size, attack.Area.CastTypeOverride, member.HitboxRadius);
+        if (!query.Run(Find).Any(h => h != member)) return;
+        if (!actionHandlers.TryGetValue(member, out var handler))
+            actionHandlers[member] = handler = new EnemyActionHandler(member, new SimCast(member, world.Coordinates), world);
+        handler.Start(attack, nearest, 0);
+        member.HoldConfusedChase(attack.Cast.AnimationLock);
+    }
+
     public void Tick(float deltaSeconds)
     {
+        TickConfusedChases();
         for (int i = 0; i < slots.Length; i++)
         {
             if (slots[i] is null) continue;
@@ -189,6 +277,9 @@ public sealed class SimParty : ISimObject
             slots[i] = null;
         }
         Array.Clear(displayNames);
+        confusedChases.Clear();
+        foreach (var handler in actionHandlers.Values) handler.Despawned();
+        actionHandlers.Clear();
     }
 
     public SimCharacter? GetRandom()

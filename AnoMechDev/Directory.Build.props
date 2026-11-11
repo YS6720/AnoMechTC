@@ -6,11 +6,15 @@
 <Project>
 
   <PropertyGroup>
+    <AnoMechServer Condition="'$(AnoMechServer)' == '' And '$(MSBuildProjectName)' == 'AnoMech'">TC</AnoMechServer>
+    <AnoMechServer Condition="'$(AnoMechServer)' == '' And '$(MSBuildProjectName)' == 'AnoMech.Global'">Global</AnoMechServer>
     <!-- 這個 repo 的建置組態固定，不接受外部覆寫。 -->
     <AnoMechEdition Condition="'$(AnoMechEdition)' == ''">User</AnoMechEdition>
     <!-- AnoMechDev 不繼承 repo root 的通用 props；固定與既有 plugin profile
          相同的 TFM／platform 輸出形狀，避免 SDK 自行再加一層目錄。 -->
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(AnoMechServer)' == 'TC'">net9.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(AnoMechServer)' == 'Global'">net10.0-windows</TargetFramework>
+    <NuGetLockFilePath>$(MSBuildProjectDirectory)\packages.$(AnoMechServer).lock.json</NuGetLockFilePath>
     <Platforms>x64</Platforms>
     <LangVersion>latest</LangVersion>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
@@ -19,12 +23,12 @@
     <PreserveCompilationContext>false</PreserveCompilationContext>
     <NoWarn>$(NoWarn);CS1591;MSB3277</NoWarn>
 
-    <!-- 每個版別／Configuration 都有自己的 bin、obj、project extensions。 -->
+    <!-- 每個 server／版別／Configuration 都有自己的 bin、obj、project extensions。 -->
     <AnoMechBuildRoot Condition="'$(AnoMechBuildRoot)' == ''">$(MSBuildThisFileDirectory)</AnoMechBuildRoot>
-    <AnoMechOutputPath Condition="'$(AnoMechOutputPath)' == ''">$(AnoMechBuildRoot)bin\$(AnoMechEdition)\$(Configuration)\</AnoMechOutputPath>
-    <AnoMechIntermediatePath Condition="'$(AnoMechIntermediatePath)' == ''">$(AnoMechBuildRoot)obj\$(AnoMechEdition)\$(Configuration)\</AnoMechIntermediatePath>
+    <AnoMechOutputPath Condition="'$(AnoMechOutputPath)' == ''">$(AnoMechBuildRoot)bin\$(AnoMechServer)\$(AnoMechEdition)\$(Configuration)\</AnoMechOutputPath>
+    <AnoMechIntermediatePath Condition="'$(AnoMechIntermediatePath)' == ''">$(AnoMechBuildRoot)obj\$(AnoMechServer)\$(AnoMechEdition)\$(Configuration)\</AnoMechIntermediatePath>
     <AnoMechExtensionsPath Condition="'$(AnoMechExtensionsPath)' == ''">$(AnoMechIntermediatePath)projectextensions\</AnoMechExtensionsPath>
-    <AnoMechBaseOutputPath Condition="'$(AnoMechBaseOutputPath)' == ''">$(AnoMechBuildRoot)bin\$(AnoMechEdition)\</AnoMechBaseOutputPath>
+    <AnoMechBaseOutputPath Condition="'$(AnoMechBaseOutputPath)' == ''">$(AnoMechBuildRoot)bin\$(AnoMechServer)\$(AnoMechEdition)\</AnoMechBaseOutputPath>
     <BaseOutputPath>$(AnoMechBaseOutputPath)</BaseOutputPath>
     <!-- 這三個是 SDK props／NuGet 使用的實際 early profile，不等到 csproj body
          才切換，避免另一版的 project.assets／generated props 先被匯入。 -->
@@ -48,7 +52,13 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildThisFileDirectory)**\bin\**;$(MSBuildThisFileDirectory)**\obj\**;$(MSBuildThisFileDirectory)artifacts\**</DefaultItemExcludes>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(AnoMechServer)' == 'Global'">
+    <DefineConstants>$(DefineConstants);ANOMECH_GLOBAL</DefineConstants>
+  </PropertyGroup>
+
   <Target Name="ValidateAnoMechBuildProfile" BeforeTargets="Restore;PrepareForBuild">
+    <Error Condition="('$(MSBuildProjectName)' != 'AnoMech' And '$(MSBuildProjectName)' != 'AnoMech.Global') Or ('$(MSBuildProjectName)' == 'AnoMech' And '$(AnoMechServer)' != 'TC') Or ('$(MSBuildProjectName)' == 'AnoMech.Global' And '$(AnoMechServer)' != 'Global')"
+           Text="AnoMechServer 必須與專案配對：AnoMech=TC、AnoMech.Global=Global；實際：$(MSBuildProjectName) / $(AnoMechServer)" />
     <Error Condition="'$(AnoMechEdition)' != 'User'"
            Text="建置組態不可覆寫；實際值：$(AnoMechEdition)" />
     <Error Condition="'$(Configuration)' == 'Release' And $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|;)DEBUG(;|$)'))"
@@ -67,14 +77,14 @@
            Text="配對 generated source 必須由目前的 64 位 pair id 產生；拒絕外部替換。" />
   </Target>
 
-  <!-- 釘死台服 Dalamud 來源。SDK props 在 Windows 上會覆寫 DalamudLibPath，
+  <!-- 依 server 釘死 Dalamud 來源。SDK props 在 Windows 上會覆寫 DalamudLibPath，
        DALAMUD_HOME 是官方保留且排在該覆寫之後的入口。 -->
   <PropertyGroup Condition="'$(DALAMUD_HOME)' == ''">
-    <DALAMUD_HOME>$(APPDATA)\FFXIVSimpleLauncher\Dalamud\Injector</DALAMUD_HOME>
+    <DALAMUD_HOME Condition="'$(AnoMechServer)' == 'TC'">$(APPDATA)\FFXIVSimpleLauncher\Dalamud\Injector</DALAMUD_HOME>
+    <DALAMUD_HOME Condition="'$(AnoMechServer)' == 'Global'">$(APPDATA)\XIVLauncher\addon\Hooks\dev</DALAMUD_HOME>
   </PropertyGroup>
 
   <PropertyGroup>
-    <DalamudLibPath Condition="'$(DALAMUD_HOME)' == ''">$(appdata)\FFXIVSimpleLauncher\Dalamud\Injector\</DalamudLibPath>
     <DalamudLibPath Condition="'$(DALAMUD_HOME)' != ''">$(DALAMUD_HOME)\</DalamudLibPath>
   </PropertyGroup>
 

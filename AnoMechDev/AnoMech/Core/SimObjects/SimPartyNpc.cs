@@ -23,6 +23,15 @@ public sealed unsafe class SimPartyNpc : SimNpc, ISimPartyMember
 
     public void Knockback(Vector3 source, float distance, float speed) => Movement.Knockback(source, distance, speed);
 
+    // 上游 1646a70 SprintHandler 的衝刺狀態（50，Param 30＝速度量）；只是外觀，移動速度由 AiManager 決定。
+    private const ushort SprintStatusId = 50;
+    private const int SprintStatusParam = 30;
+
+    public void UseSprint(float duration)
+    {
+        if (!Dead) AddStatusParam(SprintStatusId, SprintStatusParam, duration);
+    }
+
     public override void Despawn()
     {
         base.Despawn();

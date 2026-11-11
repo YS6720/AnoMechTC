@@ -37,6 +37,9 @@ public interface ISimPartyMember : ISimObject, IPositioned
     void Knockback(Vector3 source, float distance) => Knockback(source, distance, KnockbackSpeed);
 
     void Knockback(Vector3 source, float distance, float speed);
+
+    // 上游 1646a70 同名：AI 衝刺時給衝刺狀態。玩家與連線替身不由 AI 驅動，用預設空實作。
+    void UseSprint(float duration) { }
 }
 
 // Bridges the party-member death model onto SimCharacter-typed call sites. Party
@@ -46,9 +49,10 @@ public interface ISimPartyMember : ISimObject, IPositioned
 public static class SimCharacterDeathExtensions
 {
     // A party member is alive while not KO'd; any other character is alive while
-    // present. Null is not alive.
+    // present (an enemy a self-destruct EnemyAction defeated is not, while its corpse fades).
+    // Null is not alive.
     public static bool IsAlive(this SimCharacter? c)
-        => c is { IsActive: true } and not ISimPartyMember { Dead: true };
+        => c is { IsActive: true } and not ISimPartyMember { Dead: true } and not SimEnemy { Defeated: true };
 
     // Death is party-member-only. Calling Die on a non-party character is a no-op
     // (logged) — bosses are removed via Despawn, not killed.
@@ -63,6 +67,10 @@ public static class SimCharacterDeathExtensions
             Plugin.Log.Warning($"Die() on non-party {c.GetType().Name} ignored: {cause}");
             return false;
         }
+
+        // 上游 1646a70 同名：狀態到期致死（例如 TOP 的 Doom），死因＝狀態名（＋說明）。
+        public bool DieOfStatus(ushort statusId, string? explanation = null)
+            => c.Die(explanation is null ? StatusLookup.Name(statusId) : $"{StatusLookup.Name(statusId)}（{explanation}）");
 
         public void PlayKoActionTimeline()
         {

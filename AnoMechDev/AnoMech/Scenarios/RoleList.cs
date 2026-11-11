@@ -90,6 +90,10 @@ public class RoleList
         return new RoleList(party, all);
     }
 
+    // 上游 1646a70 同名：有種子版（同種子同結果，排序見 RoleOrder）；上面的無種子版不動。
+    public static RoleList RandomRoleStable(Rng rng, SimParty party)
+        => new(party, RoleOrder.RandomRoleStable(rng));
+
     public static RoleList AllExcept(SimParty party, params PartyRole[] roles)
     {
         var set = new HashSet<PartyRole>(roles);

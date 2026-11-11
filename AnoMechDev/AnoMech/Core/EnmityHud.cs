@@ -1,3 +1,4 @@
+using AnoMech.Compat.Server;
 using AnoMech.Core.SimObjects;
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
@@ -204,11 +205,8 @@ internal sealed unsafe class EnmityHud : IDisposable
             strArr->SetValue(i * 2 + StrCastname, castName, managed: true);
         }
 
-        // 台服 CS 尚未替此欄命名：Unk1 ＝ 國際服的 EnemyCount。
-        // 依據：兩版 EnemyListNumberArray 欄位順序完全相同
-        // （_data, Unk0, [此欄], TargetEntityId, UnkEntityId, Unk4, _enemies, StructSize），
-        // 國際服該位置名為 EnemyCount。
-        enemyArr->Unk1 = activeCount;
+        // 台服 CS 此欄未命名（Unk1）、國際服名為 EnemyCount；對照依據見伺服器層。
+        ServerInterop.SetEnemyCount(enemyArr, activeCount);
     }
 
     private static void MarkArraysDirty()

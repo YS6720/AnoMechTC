@@ -1,3 +1,5 @@
+using AnoMech.Compat.Server;
+using AnoMech.Core.EnemyActions;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -85,6 +87,7 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
         statusList.Update(deltaSeconds);
         vfx.Update(deltaSeconds);
         Movement.Tick(deltaSeconds);
+        confusedChaseHold = MathF.Max(0f, confusedChaseHold - deltaSeconds);
     }
 
     public virtual void Despawn()
@@ -92,7 +95,12 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
         LimitBreakRecovery = false;
         statusList.Despawn();
         vfx.Despawn();
+        if (ActorControl.Confused) ActorControl.SetConfused(false);
+        confusedChaseHold = 0f;
     }
+
+    // Set by whoever seats or spawns the character in a world.
+    internal SimEvents? SimEvents { get; set; }
     
     // -------------------------
     // Location Subsystem
@@ -154,6 +162,73 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
     protected void StopMoving() => Movement.Stop();
 
     public void Intercept(SimTether? tether, float margin = 3f) => Movement.Intercept(tether, margin);
+    // 上游 1646a70 同名：正在攔截連線、目前要走去的位置（無則 null）。
+    public bool IsIntercepting => Movement.IsIntercepting;
+    public Vector3? MoveDestination => Movement.Destination;
+
+    // An AI order (bots and enemies; the local player isn't walked by it); a mechanic that takes
+    // control uses ForceFollow. A null or dead target releases it.
+    public void Follow(SimCharacter? target = null, float speed = 6f) => Movement.Follow(target, speed);
+
+    // ── 強制位移：上游 1646a70 SimCharacter 的 ForcedMove 系列，只搬概念、接我們的 Movement ──
+    // 隊員走各自既有的擊退（玩家／bot／連線替身），其他角色走 Movement。KO 的角色不動。
+
+    // Away from `source` by a Knockback sheet row.
+    public void Knockback(Vector3 source, uint knockbackRow)
+    {
+        if (KnockbackLookup.Row(knockbackRow) is { } row) Slide(source, row.Distance, row.Speed);
+    }
+
+    // A scripted push away from `source`, which no Knockback row describes.
+    public void Push(Vector3 source, float distance, float durationSeconds)
+        => Slide(source, distance, distance / MathF.Max(durationSeconds, MinPushSeconds));
+
+    private const float MinPushSeconds = 0.01f;
+
+    private void Slide(Vector3 source, float distance, float speed)
+    {
+        if (!this.IsAlive()) return;
+        if (this is ISimPartyMember member) member.Knockback(source, distance, speed);
+        else Movement.Knockback(source, distance, speed);
+    }
+
+    // 上游的 carry 整段約 0.9 秒落定（Trajectory.Carry）；這段期間不派送一般移動，免得和原生 warp 搶位置。
+    private const float CarrySettledSeconds = 0.9f;
+
+    // Replay: ActorControl 0xF1 on the carried character (UMAD P1 arrows). Player and bot alike.
+    public void CarryTo(Vector3 destination, ushort? timeline = null)
+    {
+        if (!this.IsAlive()) return;
+        Movement.Hold(CarrySettledSeconds);
+        ActorControl.CarryTo(Coordinates.ToGlobal(destination), Rotation, timeline);
+    }
+
+    // 混亂這類強制追隨：本機玩家要原生 forced follow（ServerNative.ForcedFollow），其他角色走 Movement.Follow。
+    // 連線房主端無法把它複寫給隊友 → 記 unsupported（整輪失敗關閉）。A null or dead target releases it.
+    public void ForceFollow(SimCharacter? target, float speed = 6f)
+    {
+        if (!this.IsAlive() && target is not null) return;
+        if (NetworkEventSink is not null)
+        {
+            RecordNetworkUnsupported("forced follow");
+            return;
+        }
+        var to = target.IsAlive() ? target : null;
+        if (this is SimPlayer) ServerNative.ForcedFollow(to?.GameObjectId.ObjectId);
+        else Movement.Follow(to, speed);
+    }
+
+    // 上游 1646a70 同名：A confused character (ActorControl.Confused) chases its nearest ally
+    // (SimParty); this stands the chase still for a while, as a mechanic's own pause. A forced
+    // move in flight (carry) holds it too.
+    private float confusedChaseHold;
+    public void HoldConfusedChase(float seconds) => confusedChaseHold = MathF.Max(confusedChaseHold, seconds);
+    internal bool ConfusedChaseHeld => confusedChaseHold > 0f || Movement.IsHeld;
+
+    // The server's ActorControl packets for this character, by meaning.
+    public ActorControl ActorControl => field ??= new ActorControl(this);
+    // 上游 1646a70 同名。
+    public void VoiceLine(uint voiceLineId) => ActorControl.PlayVoiceLine(voiceLineId);
 
 
     // -------------------------
@@ -189,7 +264,9 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
         return true;
     }
     
-    public void AttachLockonVfx(uint lockonId, float duration = 0f, bool persistent = true)
+    // 頭標預設 fire-and-forget（D799 a）：上游 1646a70 的 AttachLockonVfx 只送 ActorControl.HeadMarker，
+    // 不持有 VFX。B10a 國際服實測（UMAD 預設持有的頭標）崩潰 dump 堆疊＝SimVfx.Despawn → RtlFreeHeap c0000374。
+    public void AttachLockonVfx(uint lockonId, float duration = 0f, bool persistent = false)
     {
         if (VfxFunctions.LockonVfxIconName(lockonId) is {} iconName)
             AddVfx($"vfx/lockon/eff/{iconName}.avfx", duration, persistent);
@@ -212,9 +289,16 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
         RecordNetworkEvent(new RemoveActorVfxEvent(default, path));
     }
     public SimStatus? AddStatus(ushort statusId, float duration = 0f, int stacks = 1, bool overrideStacks = false)
+        => AddStatus(statusId, duration, stacks, overrideStacks, hidden: false, appliedBy: null);
+
+    // 上游 1646a70：appliedBy＝套用它的招式（給 StatusAdded）；hidden＝新狀態先不進原生狀態列，等 SimStatus.Reveal
+    // （已顯示的狀態被刷新時不理會）。連線狀態快照沒有「隱藏中」這個資訊，房主端記 unsupported（失敗關閉）。
+    internal SimStatus? AddStatus(ushort statusId, float duration, int stacks, bool overrideStacks, bool hidden,
+        (EnemyAction Action, SimCharacter Caster)? appliedBy)
     {
         if (FindStatus(statusId) is {} status)
         {
+            var previous = status.Stacks;
             // overrideStacks: stacks is the absolute target; otherwise it's a
             // relative delta (negative consumes stacks).
             int delta = overrideStacks ? stacks - status.Stacks : stacks;
@@ -224,6 +308,8 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
                 status.Despawn();   // last stack consumed → remove the status
                 return null;
             }
+            // Consuming a stack or holding an override where it is applies nothing.
+            if (overrideStacks ? status.Stacks > previous : stacks > 0) RaiseStatusAdded(status, previous, appliedBy);
             return status;
         }
 
@@ -231,10 +317,16 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
         // A full managed/native status table refuses a new key without
         // disturbing any existing status.
         if (!CanCreateStatus(statusId, default)) return null;
-        var s = new SimStatus(this, statusId, duration, (ushort)stacks);
+        if (hidden && NetworkEventSink is not null)
+            RecordNetworkUnsupported("hidden status");
+        var s = new SimStatus(this, statusId, duration, (ushort)stacks, hidden: hidden);
         statusList.Add(s);
+        if (stacks > 0) RaiseStatusAdded(s, 0, appliedBy);
         return s;
     }
+
+    private void RaiseStatusAdded(SimStatus status, ushort previousStacks, (EnemyAction Action, SimCharacter Caster)? appliedBy = null)
+        => SimEvents?.Raise(new StatusAdded(this, status.StatusId, status.Stacks, previousStacks, appliedBy?.Action, appliedBy?.Caster));
 
     public SimStatus? AddStatusParam(
         ushort statusId,
@@ -262,6 +354,7 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
             sourceObject,
             nativeRemainingOverride);
         statusList.Add(s);
+        RaiseStatusAdded(s, 0);
         return s;
     }
     private bool CanCreateStatus(ushort statusId, GameObjectId sourceObject)
@@ -352,6 +445,17 @@ public abstract unsafe class SimCharacter(Coordinates coordinates) : ISimObject,
             var status = statusList[i];
             if (status.IsActive && status.StatusId == statusId) status.Despawn();
         }
+    }
+
+    /// <summary>不分來源，有沒有這個 id 的活躍狀態（含尚未顯示的 Hidden，同上游 AnyActiveStatusRow）。</summary>
+    public bool HasActiveStatusAnySource(ushort statusId)
+    {
+        for (var i = 0; i < statusList.Count; i++)
+        {
+            var status = statusList[i];
+            if (status.IsActive && status.StatusId == statusId) return true;
+        }
+        return false;
     }
 
     public SimStatus? FindStatus(ushort statusId, PartyRole? sourceRole)

@@ -25,6 +25,8 @@ internal sealed unsafe class PracticeLimitBreakRuntime : IDisposable
     private PendingCast? active;
     private readonly PendingCast?[] recovering = new PendingCast?[8];
     private bool available = true;
+    // SetCharge 在施放中收到的量表設定；施放結束時取代預設的結果。
+    private bool? chargeAfterCast;
     private bool disposed;
     // Temporary local-only evidence for the reported D3/D4 start rejection.
     // At most 24 failures per run; remove after the native boundary is identified.
@@ -74,7 +76,7 @@ internal sealed unsafe class PracticeLimitBreakRuntime : IDisposable
             // on every authoritative state, not only CastingRole transitions.
             var native = member.BattleCharaPtr;
             if (state.CastingRole != (PartyRole)i && native != null && native->CastInfo.IsCasting &&
-                native->CastInfo.ActionType == FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action &&
+                (byte)native->CastInfo.ActionType == (byte)FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action &&
                 TryGetValidatedAction(native->CastInfo.ActionId, out _))
                 native->CastInfo.IsCasting = false;
             member.LimitBreakRecovery = (state.RecoveryMask & (1 << i)) != 0;
@@ -270,6 +272,15 @@ internal sealed unsafe class PracticeLimitBreakRuntime : IDisposable
         available = true;
     }
 
+    // LimitBreakGauge.Set：練習只有 LB3，滿＝可用、不滿＝不可用。施放中不打斷，
+    // 等這次施放完成或取消後才套用（上游 Set 在施放中也會把量表設成新值）。
+    internal void SetCharge(bool full)
+    {
+        if (replica || disposed) return;
+        if (active != null) chargeAfterCast = full;
+        else available = full;
+    }
+
     internal void Cancel(PartyRole role)
     {
         if (disposed || active is not { } pending || pending.Role != role)
@@ -343,7 +354,8 @@ internal sealed unsafe class PracticeLimitBreakRuntime : IDisposable
         if (disposed || !ReferenceEquals(active, pending)) return;
         TraceLifecycle(pending, "completed");
         active = null;
-        available = false;
+        available = chargeAfterCast ?? false;
+        chargeAfterCast = null;
         recovering[(int)pending.Role] = pending;
         SetRecovery(pending, true);
         ApplyTankStatus(pending);
@@ -372,7 +384,8 @@ internal sealed unsafe class PracticeLimitBreakRuntime : IDisposable
         TraceLifecycle(pending, "canceled");
         pending.Cast.Despawn();
         active = null;
-        available = true;
+        available = chargeAfterCast ?? true;
+        chargeAfterCast = null;
     }
 
     private void TraceLifecycle(PendingCast pending, string phase)

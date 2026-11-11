@@ -1,3 +1,4 @@
+using AnoMech.Core.Native.Interfaces;
 using Lumina.Excel;
 using LuminaKnockback = Lumina.Excel.Sheets.Knockback;
 
@@ -25,4 +26,10 @@ internal static class KnockbackLookup
         speed = row.Speed;
         return true;
     }
+
+    // 上游 GameData.Knockback（1646a70）：含 Direction 的整列；查無此列回 null。
+    public static KnockbackRow? Row(uint knockbackId)
+        => Sheet.TryGetRow(knockbackId, out var row)
+            ? new KnockbackRow(knockbackId, row.Distance, row.Speed, row.Direction)
+            : null;
 }

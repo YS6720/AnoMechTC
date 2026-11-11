@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using AnoMech.Core.Game;
 using AnoMech.Core.Game.Ai;
 using AnoMech.Core.SimObjects;
 
@@ -6,7 +7,7 @@ namespace AnoMech.Scenarios;
 
 // The mechanic timeline for one encounter fragment. Shared identity lives on the owning
 // IZone (via Phase.Zone) and IPhase; a scenario declares only what is its own.
-public interface IScenario
+public interface IScenario : IWorldEventListener
 {
     string Name { get; }
 
@@ -53,6 +54,16 @@ public interface IScenario
     /// Computed only when a run starts, completes or a retry fires — never per frame.
     /// </summary>
     string SettingsIdentity => "";
+
+    // Mechanic roles a single player carries -- a Limit Cut number, an Accretion, a tether. Not
+    // part of DrawSettings: these are per seat, and mixing them into the fight-wide panel is
+    // what made them hard to read. Drawn in their own dialog instead.
+    bool HasPerPlayerSettings => false;
+    void DrawPerPlayerSettings() { }
+
+    // Per-player settings the fight can't produce together (see SettingsConflicts). A start is
+    // refused while this is non-empty, rather than running something the host didn't ask for.
+    IReadOnlyList<string> SettingsConflicts => [];
 }
 
 /// <summary>One stable, user-facing starting point in a progress-capable scenario.</summary>

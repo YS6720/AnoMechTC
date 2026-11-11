@@ -34,7 +34,8 @@ internal static class CrashTrace
     private const long RotateBytes = 16L * 1024 * 1024;
 
     // 載入／開場標記、連線、顯示給玩家的錯誤。以前每一行都在 dalamud.log 再寫一份。
-    private static readonly string[] MirroredPrefixes = ["===", "[多人]", "[relay]", "[chat!]"];
+    // [D788]：UMAD P1 混亂旗標的舉起／放下與 networked 列清單（低頻，國際服實測要在 /xllog 核對）。
+    private static readonly string[] MirroredPrefixes = ["===", "[多人]", "[relay]", "[chat!]", "[D788]"];
 
     private static FileStream? Stream
     {

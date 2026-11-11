@@ -8,12 +8,14 @@ namespace AnoMech.Core.Game;
 // need to schedule receive the instance via constructor injection. Game.Tick
 // advances the scheduler (scaled by Game.EventTimeScale) before World.Tick;
 // Game.ResetInternal clears it between scenarios.
-public sealed class EventScheduler
+public sealed partial class EventScheduler
 {
     private readonly List<Entry> entries = new();
     private float elapsed;
 
     public float Time => elapsed;
+    // 上游 1646a70 同名；與 Time 同值。
+    public float Elapsed => elapsed;
     /// <summary>Scheduled callbacks not yet fired. Zero means the timeline has fully played out.</summary>
     public int Pending => entries.Count;
 
@@ -35,11 +37,23 @@ public sealed class EventScheduler
         elapsed += deltaSeconds;
         while (entries.Count > 0 && entries[0].Time <= elapsed)
         {
-            var action = entries[0].Action;
+            var due = entries[0];
             entries.RemoveAt(0);
-            action();
+            // 上游 1646a70 同：一項出錯只丟掉它自己（記一行 WRN），不讓例外拋出 Tick、把同一幀
+            // 後面的排程與 World.Tick 一起擋掉（D801 a）。
+            try
+            {
+                due.Action();
+            }
+            catch (Exception e)
+            {
+                ReportSkipped(due.Time, e);
+            }
         }
     }
+
+    // 實作在 EventScheduler.Diagnostics.cs（寫 DiagnosticLog.Warn）；Tests 只連結本檔，呼叫由編譯器省略。
+    static partial void ReportSkipped(float time, Exception e);
 
     public void Clear()
     {

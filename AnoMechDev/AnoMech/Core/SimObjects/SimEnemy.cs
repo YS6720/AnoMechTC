@@ -1,3 +1,4 @@
+using AnoMech.Core.EnemyActions;
 using AnoMech.Compat;
 using AnoMech.Core.Game;
 using AnoMech.Helpers;
@@ -48,7 +49,11 @@ public record struct EnemySpawnConfig(
     float HitboxRadius = 0f,    // 0 = ModelChara unscaled radius × Scale
     byte? InitialModeAttributeFlags = null, // null = engine default; override canonical body sub-mesh variants only.
     ulong? MainHandModel = null, // null = BNpcBase/NpcEquip; 0 = explicitly unarmed.
-    ulong? OffHandModel = null);
+    ulong? OffHandModel = null,
+    // 上游 1646a70 同名（尾端加，位置參數不位移）。Visibility 見 SpawnVisibility；IsVisible:false 仍照舊隱形。
+    SpawnVisibility Visibility = SpawnVisibility.Visible,
+    // 上游同名：BNpc 在副本 layout 裡的實例 id；非 0 才寫 GameObject.LayoutId（上游自標效果 UNVERIFIED）。
+    uint LayoutId = 0);
 
 public sealed unsafe class SimEnemy : SimNpc
 {
@@ -79,6 +84,8 @@ public sealed unsafe class SimEnemy : SimNpc
     public byte ModelState => modelState;
 
     public uint BNpcBaseId { get; }
+    // 上游同名：生成時的設定（Visibility 決定何時顯形，InvisibleHelper 決定釋放時直接轉向）。
+    public EnemySpawnConfig SpawnConfig { get; internal set; }
 
 
     private uint resolvedNameId = uint.MaxValue;
@@ -241,6 +248,7 @@ public sealed unsafe class SimEnemy : SimNpc
         // Prefer the current runtime sheet name; only ask the native resolver
         // when the row has no usable name.
         if (config.NameId != 0) chara->NameId = config.NameId;
+        if (config.LayoutId != 0) gameObj->LayoutId = config.LayoutId;
         var displayName = CanonicalName(chara->NameId) ?? gameObj->GetName().ToString();
         if (string.IsNullOrWhiteSpace(displayName) || displayName.Contains('<') ||
             displayName.StartsWith("_rsv_", StringComparison.Ordinal))
@@ -293,7 +301,8 @@ public sealed unsafe class SimEnemy : SimNpc
         // Mirror the native position/rotation writes above into the C#-side fields.
         enemy.SetPosition(config.Placement);
         enemy.SetTargetable(config.Targetable);
-        if (!config.IsVisible) enemy.SetVisible(false);
+        enemy.SpawnConfig = config;
+        if (SpawnVisibilityRules.HiddenAtSpawn(config.IsVisible, config.Visibility)) enemy.SetVisible(false);
         return enemy;
     }
 
@@ -314,6 +323,7 @@ public sealed unsafe class SimEnemy : SimNpc
         // 玩家會看到「敵人消失了，杖／斧還插在原地」（維護者 2026-09-18 死刻實測）。
         var chara = BattleCharaPtr;
         if (chara != null) SetWeaponsVisible(chara, false);
+        actions?.Despawned();
         cast.Despawn();
         base.Despawn();
     }
@@ -379,7 +389,48 @@ public sealed unsafe class SimEnemy : SimNpc
 
     public void SetVisible(bool visible) => desiredVisible = visible;
 
-    public void Follow(SimCharacter? target = null, float speed = 6f) => Movement.Follow(target, speed);
+    // HiddenUntilShown：播到出場類時間軸就顯形（規則見 SpawnVisibilityRules.RevealsOnTimeline）。
+    public override void PlayActionTimeline(ushort timelineId, ushort loopId = 0, ushort baseOverride = 0)
+    {
+        base.PlayActionTimeline(timelineId, loopId, baseOverride);
+        RevealOnTimeline(timelineId);
+    }
+
+    // EnemyAction 釋放時：招式的 AnimationEnd 是出場時間軸（例如分身的 show／hide 組）就顯形。
+    internal void RevealOnAction(uint actionId)
+    {
+        if (SpawnConfig.Visibility != SpawnVisibility.HiddenUntilShown) return;
+        if (Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>().TryGetRow(actionId, out var action))
+            RevealOnTimeline((ushort)action.AnimationEnd.RowId);
+    }
+
+    // HiddenUntilPopIn：ActorControl.PopIn 送出後顯形。
+    internal void RevealOnPopIn()
+    {
+        if (SpawnConfig.Visibility == SpawnVisibility.HiddenUntilPopIn) SetVisible(true);
+    }
+
+    private void RevealOnTimeline(ushort timelineId)
+    {
+        if (SpawnConfig.Visibility != SpawnVisibility.HiddenUntilShown || timelineId == 0) return;
+        if (!Plugin.DataManager.GetExcelSheet<ActionTimeline>().TryGetRow(timelineId, out var row)) return;
+        if (SpawnVisibilityRules.RevealsOnTimeline(SpawnConfig.Visibility, row.Key.ExtractText())) SetVisible(true);
+    }
+
+    public void SetAnimationState(byte slot, byte value) => ActorControl.SetAnimationState(slot, value);
+
+    private const float FadeOutDuration = 1.3f;
+
+    // 上游同名：A spent add or a boss leaving at a phase transition: gone without dying.
+    public void FadeOut()
+    {
+        ActorControl.FadeOut();
+        if (World is { } world) world.Events.Add(FadeOutDuration, Despawn);
+        else Despawn();
+    }
+
+    // 上游 1646a70：Stays turned toward the target, holding still while casting or animation-locked; null releases it.
+    public void KeepFacing(SimCharacter? target) => Movement.KeepFacing(target);
 
     private void ReconcileVisibility()
     {
@@ -474,7 +525,73 @@ public sealed unsafe class SimEnemy : SimNpc
         => cast.NativeActionEffect(actionId, animationLock, spellId, animationVariation,
             actionType, flags, actionTargets, rotation, position, animationTargetId, ballistaId);
 
-    public override bool AnimationLock => cast.IsBusy;
+    // ── EnemyAction（上游 1646a70 新式招式，與上面的舊 Cast／NativeCast 並存）──────────
+
+    // 生成它的世界（SimWorld.SpawnEnemy 設定）；EnemyAction 的判定、排程與事件都在這裡。
+    internal SimWorld? World { get; set; }
+
+    // SimWorld.SpawnHelperPool 生成的隱形 helper：釋放時直接轉向目標（看不見的模型要下一次刷新才轉）。
+    internal bool IsPooledHelper { get; set; }
+
+    private EnemyActionHandler? actions;
+    private EnemyActionHandler Actions
+        => actions ??= new EnemyActionHandler(this, cast,
+            World ?? throw new InvalidOperationException($"{DisplayName} was not spawned through SimWorld.SpawnEnemy"));
+
+    // An action with effects (area, damage, statuses, ...) or configuration beyond the sheet's.
+    // 上游另有 Cast(uint, CastTarget) 純視覺 overload；Vector3 可隱式轉 CastTarget，會和既有 Cast(uint, Vector3?) 歧義，不搬，
+    // 純視覺招式寫 Cast(new EnemyAction(id), target)。
+    public void Cast(EnemyAction action, CastTarget target = default, byte animationVariation = 0) =>
+        Actions.Start(action, target, animationVariation);
+
+    // The BNpcName row its pooled helpers are shown under where retail follows a form it took rather
+    // than its spawn name; null = its own NameId.
+    public uint? HelperName { get; set; }
+
+    internal uint NameId => BattleCharaPtr == null ? 0 : BattleCharaPtr->NameId;
+
+    // The action cast by one of the zone's pooled helpers acting for this enemy, standing at `at`
+    // (this enemy's placement by default). A dead or despawned enemy still casts, unlinked.
+    public void CastFromHelper(EnemyAction action, CastTarget target = default, Placement? at = null, byte animationVariation = 0) =>
+        (World ?? throw new InvalidOperationException($"{DisplayName} was not spawned through SimWorld.SpawnEnemy"))
+            .CastFromHelper(this, action, target, at ?? this.Placement(), animationVariation);
+
+    public void CastFromHelper(uint actionId, CastTarget target = default, Placement? at = null, float animationLock = 0.6f) =>
+        CastFromHelper(new EnemyAction(actionId) { Cast = new() { AnimationLock = animationLock } }, target, at);
+
+    // Interrupts an EnemyAction cast still on its bar: neither its effect nor its mechanics go out.
+    public void CancelCast(CastCancelReason reason)
+    {
+        if (actions?.CancelCast(reason) == true) World?.HelperCastCancelled(this);
+    }
+
+    public override bool AnimationLock => cast.IsBusy || actions?.AwaitingRelease == true;
+
+    // Seconds until AnimationLock ends; infinite while the bar is up or the ActionEffect pending.
+    internal float BusyFor => cast.IsCasting || actions?.AwaitingRelease == true ? float.PositiveInfinity : cast.RemainingAnimationLock;
+
+    // 自爆類招式打倒自己（DefeatCasterEffect）：招式落地時倒下，動作鎖結束後播死亡動畫、屍體淡出後移除。
+    // 只有 EnemyAction 路徑會走到；既有場景的敵人仍照舊以 Despawn 退場。
+    public bool Defeated { get; private set; }
+
+    private const float CorpseFadeDelay = 8f;
+    private const float CorpseFadeDuration = 1.7f;
+
+    internal void DefeatByOwnAction(EnemyAction action)
+    {
+        if (Defeated || World is not { } world) return;
+        actions?.CancelCast(CastCancelReason.Cancelled);
+        Defeated = true;
+        // 倒下的屍體不再走：清掉進行中的移動、追隨與轉向。
+        StopMoving();
+        Movement.Follow(null);
+        Movement.KeepFacing(null);
+        ActorControl.SetMode(CharacterModes.Dead, 2);
+        var animationDelay = action.Cast.AnimationLock;
+        world.Events.Add(animationDelay, ActorControl.PlayDeathAnimation);
+        world.Events.Add(animationDelay + CorpseFadeDelay, ActorControl.FadeCorpse);
+        world.Events.Add(animationDelay + CorpseFadeDelay + CorpseFadeDuration, Despawn);
+    }
 
     public override void Tick(float deltaSeconds)
     {

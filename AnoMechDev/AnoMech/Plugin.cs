@@ -7,6 +7,7 @@ using Dalamud.Plugin;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
+using AnoMech.Compat.Server;
 using AnoMech.Core;
 using AnoMech.Core.Game;
 using AnoMech.Core.Map;
@@ -53,6 +54,8 @@ public sealed class Plugin : IDalamudPlugin
     // Plugin.* PluginService pattern).
     internal static Game GameInstance { get; private set; } = null!;
     private Core.Combat.RotationSim? rotationSim;
+    // 區域／副本事件經伺服器層轉接（API 13 與 API 15 委派不同，見 Compat/Server）。
+    private readonly ServerGameEvents gameEvents;
     // Session-lifetime input hooks, owned here (not Game) so they're hooked once
     // per load rather than per scenario. SimPlayer is the sole writer of their
     // flags — it reconciles them from its own state each tick.
@@ -63,6 +66,7 @@ public sealed class Plugin : IDalamudPlugin
     private MainWindow MainWindow { get; init; }
     private RunningSimWindow RunningSimWindow { get; init; }
     private HitRangeOverlay HitRangeOverlay { get; init; }
+    private GuideLineOverlay GuideLineOverlay { get; init; }
     internal PositionEditorWindow? PositionEditorWindow { get; init; }
     internal NpcCollectorWindow? NpcCollectorWindow { get; init; }
 
@@ -87,6 +91,7 @@ public sealed class Plugin : IDalamudPlugin
         MainWindow = new MainWindow(this);
         RunningSimWindow = new RunningSimWindow(this, MainWindow);
         HitRangeOverlay = new HitRangeOverlay(this);
+        GuideLineOverlay = new GuideLineOverlay(this);
 
         if (BuildEdition.IsDeveloper)
         {
@@ -98,6 +103,7 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(RunningSimWindow);
         WindowSystem.AddWindow(HitRangeOverlay);
+        WindowSystem.AddWindow(GuideLineOverlay);
         if (PositionEditorWindow is { } positionEditorWindow)
             WindowSystem.AddWindow(positionEditorWindow);
         if (NpcCollectorWindow is { } npcCollectorWindow)
@@ -121,10 +127,8 @@ public sealed class Plugin : IDalamudPlugin
 
         PluginInterface.UiBuilder.OpenConfigUi += ToggleConfigUi;
         PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
-        ClientState.TerritoryChanged += OnTerritoryChanged;
-        DutyState.DutyStarted += OnDutyStarted;
-        DutyState.DutyWiped += OnDutyWiped;
-        DutyState.DutyCompleted += OnDutyCompleted;
+        gameEvents = new ServerGameEvents(ClientState, DutyState,
+            OnTerritoryChanged, OnDutyStarted, OnDutyWiped, OnDutyCompleted);
 
         // Initialize Pointers
         CharacterManagerPointers.Initialize();
@@ -170,20 +174,30 @@ public sealed class Plugin : IDalamudPlugin
         Framework.Update -= OnFrameworkUpdate;
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
-        ClientState.TerritoryChanged -= OnTerritoryChanged;
-        DutyState.DutyStarted -= OnDutyStarted;
-        DutyState.DutyWiped -= OnDutyWiped;
-        DutyState.DutyCompleted -= OnDutyCompleted;
+        // D788：Tick 已停，先放開原生強制追隨與本插件舉的混亂旗標，不依賴後面的世界拆除成功；
+        // 兩者各自 try，一個失敗不擋另一個。之後 Despawn 再呼叫一次是 no-op。
+        try { ServerNative.ForcedFollow(null); }
+        catch (System.Exception e) { Log.Error(e, "[D788] 卸載時解除強制追隨失敗"); }
+        try { ServerNative.ReleaseControlAffliction(); }
+        catch (System.Exception e) { Log.Error(e, "[D788] 卸載時還原混亂旗標失敗"); }
+        try
+        {
+            gameEvents.Dispose();
 
-        WindowSystem.RemoveAllWindows();
+            WindowSystem.RemoveAllWindows();
 
-        rotationSim?.Dispose();
-        Multiplayer.Dispose();
-        Game.Dispose();
-        // After Game.Dispose so World.Dispose → SimPlayer.Despawn can still clear
-        // the lock flags through the hooks before they're torn down.
-        PlayerInputHooks.Dispose();
-        Recorder?.Dispose();
+            rotationSim?.Dispose();
+            Multiplayer.Dispose();
+            Game.Dispose();
+        }
+        finally
+        {
+            // After Game.Dispose so World.Dispose → SimPlayer.Despawn can still clear
+            // the lock flags through the hooks before they're torn down. finally：前段拆除拋例外
+            // 時仍拆 input hook 與 Recorder 的原生 hook（例外不被吞掉）。
+            try { PlayerInputHooks.Dispose(); }
+            finally { Recorder?.Dispose(); }
+        }
         LogManager?.Dispose();
         ConfigWindow.Dispose();
         MainWindow.Dispose();
@@ -216,8 +230,7 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    // API13 的 TerritoryChanged 是 Action<ushort>（API15 才放寬成 uint）
-    private void OnTerritoryChanged(ushort territory)
+    private void OnTerritoryChanged(uint territory)
     {
         var row = DataManager.GetExcelSheet<TerritoryType>()?.GetRowOrDefault(territory);
         var isInn = row?.TerritoryIntendedUse.RowId == 2; // TerritoryIntendedUse.Inn
@@ -245,9 +258,7 @@ public sealed class Plugin : IDalamudPlugin
             MainWindow.IsOpen = true;
     }
 
-    // API13 的 IDutyState 事件是 EventHandler<ushort>（territoryType）；
-    // API15 才改成帶 IDutyStateEventArgs（內含 TerritoryType RowRef）。
-    private void OnDutyStarted(object? sender, ushort territoryType)
+    private void OnDutyStarted(uint territoryType)
     {
         if (BuildEdition.IsDeveloper)
             LogManager?.LogCombatStart(territoryType);
@@ -255,13 +266,13 @@ public sealed class Plugin : IDalamudPlugin
             recorder.Start($"副本開始 territory={territoryType}");
     }
 
-    private void OnDutyWiped(object? sender, ushort territoryType)
+    private void OnDutyWiped(uint territoryType)
     {
         if (BuildEdition.IsDeveloper)
             LogManager?.LogCombatEnd(territoryType, wipe: true);
     }
 
-    private void OnDutyCompleted(object? sender, ushort territoryType)
+    private void OnDutyCompleted(uint territoryType)
     {
         if (BuildEdition.IsDeveloper)
             LogManager?.LogCombatEnd(territoryType, wipe: false);

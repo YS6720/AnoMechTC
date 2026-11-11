@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Collections.Immutable;
 using AnoMech.Core.SimObjects;
 
 namespace AnoMech.Scenarios;
@@ -12,6 +14,11 @@ public interface IPhase
     byte? Weather => null;
     ushort Bgm => 0;
 
+    // Slot -> resting state where the phase's start differs from DutyInitData.MapEffectSnapshot,
+    // aggregated from the replay's single MapEffect packets between the snapshot and the phase
+    // start.
+    IReadOnlyDictionary<byte, ushort> ArenaMapEffectOverrides => ImmutableDictionary<byte, ushort>.Empty;
+
     // Optional phase-wide setup, between zone and scenario Run. Default no-op.
     void Run(SimWorld world) { }
 }
@@ -21,12 +28,14 @@ public sealed class Phase : IPhase
 {
     private readonly Action<SimWorld>? init;
 
-    public Phase(IZone zone, string name, byte? weather, ushort bgm, Action<SimWorld>? init = null)
+    public Phase(IZone zone, string name, byte? weather, ushort bgm, Action<SimWorld>? init = null,
+        IReadOnlyDictionary<byte, ushort>? arenaMapEffectOverrides = null)
     {
         Zone = zone;
         Name = name;
         Weather = weather;
         Bgm = bgm;
+        ArenaMapEffectOverrides = arenaMapEffectOverrides ?? ImmutableDictionary<byte, ushort>.Empty;
         this.init = init;
     }
 
@@ -34,6 +43,7 @@ public sealed class Phase : IPhase
     public string Name { get; }
     public byte? Weather { get; }
     public ushort Bgm { get; }
+    public IReadOnlyDictionary<byte, ushort> ArenaMapEffectOverrides { get; }
 
     public void Run(SimWorld world) => init?.Invoke(world);
 }

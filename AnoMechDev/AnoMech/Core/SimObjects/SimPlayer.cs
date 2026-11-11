@@ -1,3 +1,4 @@
+using AnoMech.Compat.Server;
 using System;
 using System.Numerics;
 using AnoMech.Core.Game;
@@ -42,7 +43,10 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
 
     internal override BattleChara* BattleCharaPtr => (BattleChara*)(Plugin.ObjectTable.LocalPlayer?.Address ?? 0);
 
-    private protected override PlayerMovement Movement => field ??= new PlayerMovement(this);
+    // 打法直接對玩家下的移動（MoveTo 對玩家是 no-op）交給引導線；SimWorld.CreateParty 接到 Guide。
+    internal Action<Vector3>? ScriptedMove { get; set; }
+
+    private protected override PlayerMovement Movement => field ??= new PlayerMovement(this, t => ScriptedMove?.Invoke(t));
 
     public void Knockback(Vector3 source, float distance, float speed) => Movement.Knockback(source, distance, speed);
 
@@ -56,7 +60,13 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
         // Activity includes Passage's activation; only movement or another action cancels it.
         if (SampleActivity()) Combat.Jobs.Paladin.CancelChanneled(this);
         SyncInputLock();
+        ServerNative.SyncControlAffliction(!Dead && HasActiveStatusAnySource(ConfusedStatusId));
     }
+
+    // D788 a：UMAD 的混亂（上游 UmadConstants.StatusId.Confused；共用核心不能引用台服被 Compile Remove 的
+    // UMAD 常數）。上游以任一 active 狀態的 LockControl 舉 63；我方只看這一個狀態，免得 KO 狀態 896 等
+    // 也鎖住所有國際版場景。起訖＝狀態的 active 期間（含 Hidden，同上游）。
+    private const ushort ConfusedStatusId = 0x503;
 
     private bool SampleActivity()
     {
@@ -108,6 +118,9 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
     {
         Dead = true;
         StopMoving();
+        // 上游 PlayerMotion 在 !Alive 時釋放強制追隨；原生控制器不放就會拖著倒地的玩家走。
+        ServerNative.ForcedFollow(null);
+        ServerNative.ReleaseControlAffliction(); // 先停追隨、再放混亂旗標，與倒地同一幀
         DropHpBar(); // real-death bar drop (bots do the same in their own OnKilled); godmode skips this path
         AddStatus(StunStatusId);
         this.PlayKoActionTimeline();
@@ -116,6 +129,10 @@ public sealed unsafe class SimPlayer(Coordinates coordinates) : SimCharacter(coo
 
     public override void Despawn()
     {
+        // 先停原生強制追隨、再放本插件舉的混亂旗標（D788），都在可能失敗的清理之前。
+        // 上游 PlayerMotion.Clear() 同：場景結束不留原生強制追隨（沒開過時不送封包）。
+        ServerNative.ForcedFollow(null);
+        ServerNative.ReleaseControlAffliction();
         SimCast.CloseLocalCastBar(this);
         base.Despawn();
         StopMoving();

@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AnoMech.Compat.Server;
 using AnoMech.Core.Combat.Jobs;
 using AnoMech.Scenarios;
 using AnoMech.Scenarios.Recorded;
@@ -210,9 +211,9 @@ public sealed class NetworkResourceCatalog
                 weatherIds.Add(row.RowId);
             foreach (var row in Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Lockon>())
             {
-                // Same TC field mapping as VfxFunctions.LockonVfxIconName:
-                // Unknown0 is the local sheet's actor-VFX icon name.
-                var iconName = row.Unknown0.ExtractText();
+                // Same server-layer field mapping as VfxFunctions.LockonVfxIconName:
+                // the actor-VFX icon name (TC Unknown0 / global IconName).
+                var iconName = ServerInterop.LockonIconName(row).ExtractText();
                 if (!string.IsNullOrEmpty(iconName))
                     AddVisual($"vfx/lockon/eff/{iconName}.avfx", actor: true, statik: false);
             }

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Numerics;
 using System.Text;
 using AnoMech.Core;
+using AnoMech.Core.EnemyActions;
 using AnoMech.Core.Combat;
 using AnoMech.Core.Game;
 using AnoMech.Core.Game.Ai;
@@ -12,6 +13,7 @@ using AnoMech.Core.Game.Geometry;
 using AnoMech.Core.Game.Party;
 using AnoMech.Core.Map;
 using AnoMech.Multiplayer;
+using AnoMech.Scenarios;
 namespace AnoMech.Core.SimObjects;
 
 public enum ScenarioResult
@@ -119,8 +121,32 @@ public sealed class SimWorld : ISimObject, IDisposable
     /// Main owns Begin/End lifecycle; no overlay is applied before Begin.
     /// </summary>
     public PracticePositions PracticePositions { get; }
+    // 引導線：AiManager 每一步寫入本機玩家座位的目的地，GuideLineOverlay 讀；拆場時清掉。
+    public GuideLine Guide { get; } = new();
     public EventScheduler Events { get; }
     public Vector3 ScenarioOrigin { get; set; }
+
+    // The run's mechanic randomness; engine noise draws from a named Stream instead, so it
+    // can't shift these rolls. Replaced per run through Reseed.
+    public Rng Rng { get; private set; } = Rng.Detached;
+    private readonly Dictionary<string, Rng> streams = new();
+
+    public void Reseed(int seed)
+    {
+        Rng = new Rng(seed);
+        streams.Clear();
+    }
+
+    // This run's independent stream for one consumer, created on first use.
+    public Rng Stream(string name)
+    {
+        if (!streams.TryGetValue(name, out var stream))
+            streams[name] = stream = Rng.Fork(name);
+        return stream;
+    }
+
+    // 世界事件（上游 SimEvents）：在發生處排隊，Tick 尾端送給執行中的場景。
+    internal SimEvents SimEvents { get; } = new();
 
     // Converts between scenario-local coordinates (the SimXxx public API) and
     // world/global coordinates (the engine's GameObject->Position). Shared by
@@ -178,7 +204,7 @@ public sealed class SimWorld : ISimObject, IDisposable
     private SimTether CreateTether(ITetherEnd from, ITetherEnd to, ushort tetherId, float duration,
         ushort debuffStatusId, byte progress = 1)
     {
-        var tether = new SimTether(from, to, new TetherContext(Party.Find, tetherId), debuffStatusId, duration, progress);
+        var tether = new SimTether(from, to, new TetherContext(Party.Find, tetherId), debuffStatusId, duration, SimEvents, progress);
         children.Add(tether);
         return tether;
     }
@@ -189,10 +215,66 @@ public sealed class SimWorld : ISimObject, IDisposable
         var enemy = SimEnemy.Spawn(config, this);
         if (enemy != null)
         {
+            enemy.World = this;
             children.Add(enemy);
             BindNetworkEventSink(enemy);
+            enemy.SimEvents = SimEvents;
         }
         return enemy;
+    }
+
+    // 移植自上游 1646a70 SimWorld.SpawnHelperPool 起至 NpcPushDistance。
+    // The zone's helpers, spawned at the start of every run as retail spawns them at every pull's.
+    internal void SpawnHelperPool(HelperPool pool)
+    {
+        if (pool.Count <= 0) return;
+        if (children.OfType<SimHelperPool>().FirstOrDefault() is { } previous)
+        {
+            previous.Despawn();
+            children.Remove(previous);
+        }
+        var config = new EnemySpawnConfig(BNpcBaseId: pool.BNpcBaseId, Level: 1, EnemyList: EnemyListMode.Never, IsVisible: false);
+        var helpers = new List<SimEnemy>(pool.Count);
+        for (var i = 0; i < pool.Count; i++)
+            if (SpawnEnemy(config) is { } helper)
+            {
+                helper.IsPooledHelper = true;
+                helpers.Add(helper);
+            }
+        children.Add(new SimHelperPool(helpers));
+    }
+
+    // A pooled cast dropped because every helper was still busy: the zone's pool is too small for
+    // what the scenario casts at once.
+    public event Action<uint>? HelperPoolExhausted;
+
+    internal void CastFromHelper(SimEnemy parent, EnemyAction action, CastTarget target, Placement at, byte animationVariation)
+    {
+        if (children.OfType<SimHelperPool>().FirstOrDefault()?.Cast(parent, action, target, at, animationVariation) == true) return;
+        Plugin.Log.Warning($"Helper pool exhausted: {ActionLookup.Name(action.ActionId)} ({action.ActionId}) for {parent.DisplayName} dropped.");
+        HelperPoolExhausted?.Invoke(action.ActionId);
+    }
+
+    internal void HelperCastCancelled(SimEnemy helper) => children.OfType<SimHelperPool>().FirstOrDefault()?.Unlink(helper);
+
+    // Where the server stops an NPC a knockback pushes: a circle this far from ScenarioOrigin. Set by
+    // the zone for the run; without it a push goes its full distance.
+    public float? NpcKnockbackStopRadius { get; private set; }
+
+    public void StopNpcKnockbacksAt(float radius) => NpcKnockbackStopRadius = radius;
+
+    // How far an NPC at `position` (scenario-local) pushed away from `from` goes, at most `distance`.
+    public float NpcPushDistance(Vector3 position, Vector3 from, float distance)
+    {
+        if (NpcKnockbackStopRadius is not { } radius) return distance;
+        var start = new Vector2(position.X, position.Z);
+        var away = start - new Vector2(from.X, from.Z);
+        if (away == Vector2.Zero) return distance;
+        var direction = Vector2.Normalize(away);
+        var along = Vector2.Dot(start, direction);
+        var discriminant = along * along - (start.LengthSquared() - radius * radius);
+        var toCircle = discriminant <= 0f ? 0f : MathF.Max(0f, -along + MathF.Sqrt(discriminant));
+        return MathF.Min(distance, toCircle);
     }
 
     // Allocates an EventObject actor in EventObjectManager's 40-slot pool and
@@ -302,12 +384,17 @@ public sealed class SimWorld : ISimObject, IDisposable
         IReadOnlyList<Multiplayer.MpAppearance?>? appearances = null,
         Func<bool>? isCurrent = null)
     {
-        var party = new SimParty();
+        var party = new SimParty(this);
+        // 引導線：打法直接對玩家下的移動（MoveTo，對玩家是 no-op）也算下一個站位。
+        var player = new SimPlayer(Coordinates)
+        {
+            ScriptedMove = local => Guide.Publish(new Vector2(local.X, local.Z), Events.Time),
+        };
         try
         {
             PartyCreator.Populate(
                 party,
-                new SimPlayer(Coordinates),
+                player,
                 playerJob,
                 this,
                 roleOverride,
@@ -329,10 +416,11 @@ public sealed class SimWorld : ISimObject, IDisposable
         children.Add(party);
         Party = party;
         Result = ScenarioResult.Running;
+        foreach (var character in Party.AllMembers())
+            character.SimEvents = SimEvents;
         if (networkEventSink != null)
             foreach (var character in Party.AllMembers())
                 BindNetworkEventSink(character);
-
     }
     public void Tick(float deltaSeconds)
     {
@@ -347,10 +435,14 @@ public sealed class SimWorld : ISimObject, IDisposable
             Plugin.Config.EnablePartyListDisplayOrder,
             partyHud.SlotRoles,
             Plugin.Config.PartyListDisplayOrder);
+        SimEvents.Dispatch();
     }
 
+    // 先清監聽者，拆場時不送出任何事件（上游同序）。
     public void Despawn()
     {
+        SimEvents.Clear();
+        Guide.Clear();
         networkEventSink = null;
         LimitBreaks?.Dispose();
         LimitBreaks = null;
@@ -364,6 +456,7 @@ public sealed class SimWorld : ISimObject, IDisposable
         waymarks.ClearAll();
         Obstacles.Clear();
         ScenarioOrigin = default;
+        NpcKnockbackStopRadius = null;
     }
 
     public void Dispose()

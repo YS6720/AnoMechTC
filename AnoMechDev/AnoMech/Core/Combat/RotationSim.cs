@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using AnoMech.Compat.Server;
 using AnoMech.Core.Game;
 using AnoMech.Core.Native;
 using Dalamud.Hooking;
@@ -394,9 +395,8 @@ public sealed unsafe class RotationSim : IDisposable
     /// 幫玩家發一份合成的 ActionEffect 回包（SimCast.NativeActionEffect 同構、目標＝
     /// 玩家當前目標）。client 處理自己動作的回包時會點連段燈／清 queue——這正是
     /// 防火牆擋掉、導致「技能按得動但循環死掉」的那半邊。零傷害 effect 區塊＝純狀態演出。
+    /// GlobalSequence 與敵方帶效果的 ActionEffect 共用 <see cref="ActionEffects"/> 一條序號。
     /// </summary>
-    private static uint globalSeq = 0x40000000;
-
     private static void FirePlayerActionEffect(uint actionId, ushort sourceSequence = 0, bool selfTarget = false)
     {
         var lp = Plugin.ObjectTable.LocalPlayer;
@@ -415,14 +415,14 @@ public sealed unsafe class RotationSim : IDisposable
         {
             AnimationTargetId = target,
             ActionId = actionId,
-            GlobalSequence = ++globalSeq,
+            GlobalSequence = ActionEffects.NextGlobalSequence(),
             AnimationLock = 0.6f,
             BallistaEntityId = NullObjectId,
             SourceSequence = sourceSequence,
             RotationInt = MathUtil.QuantizeRotation(chara->Rotation),
             SpellId = (ushort)actionId,
             AnimationVariation = 0,
-            ActionType = ActionType.Action,
+            ActionType = ServerInterop.ActionTypeField(ActionType.Action),
             Flags = 0,
             NumTargets = (byte)(target.ObjectId == NullObjectId ? 0 : 1),
         };

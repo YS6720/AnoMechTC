@@ -1,0 +1,6 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <AssemblyName>AnoMechIntl</AssemblyName>
+  </PropertyGroup>
+  <Import Project="AnoMech.Shared.targets" />
+</Project>

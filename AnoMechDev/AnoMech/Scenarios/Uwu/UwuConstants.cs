@@ -80,13 +80,6 @@ public class UwuConstants
         public const uint UltimateAnnihilation = 11596;
     }
 
-    public class ActionTimelineId
-    {
-        public const ushort WarpStart = 7737;
-        public const ushort WarpStart2 = 7738;
-        public const ushort WarpEnd = 7747;
-    }
-
     public class StatusId
     {
         public const ushort InfernalFetters = 377;

@@ -24,7 +24,12 @@ public static class ScenarioSettings
         {
             if (!property.CanRead || property.GetIndexParameters().Length != 0) continue;
             text.Append('|').Append(property.Name).Append('=');
-            text.Append(Convert.ToString(property.GetValue(overrides), CultureInfo.InvariantCulture) ?? "null");
+            var value = property.GetValue(overrides);
+            // A per-seat setting's ToString is only its type name; Describe carries the seat values
+            // (solo: own value; hosting: every forced seat), or null when nothing is forced.
+            text.Append(value is IPerRoleSetting perRole
+                ? perRole.Describe() ?? "null"
+                : Convert.ToString(value, CultureInfo.InvariantCulture) ?? "null");
         }
         return text.ToString();
     }

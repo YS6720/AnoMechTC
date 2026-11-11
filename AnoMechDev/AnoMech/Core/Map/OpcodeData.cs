@@ -4,12 +4,14 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using AnoMech.Compat.Server;
 
 namespace AnoMech.Core.Map;
 
 internal static class OpcodeData
 {
-    internal const string HyperboreaCommit = "2538a9053b7ca04ad33880d8cf50d2b3d67c5cff";
+    // 依伺服器各釘一個 commit，見 Compat/Server/{Tc,Global}/ServerFirewall.cs。
+    internal const string HyperboreaCommit = ServerFirewall.HyperboreaCommit;
     internal const int MaxGameVersionLength = 64;
     internal const int MaxBodyBytes = 64 * 1024;
     internal const int MaxZoneDownOpcodes = 2048;

@@ -7,7 +7,7 @@ FFXIV 台服（繁中）版的 **AnoMech** 移植。在旅館裡生出假隊友�
 ## 功能
 
 - **單人練機制**：生成其餘七名假隊友與 BOSS，重現招式時間軸、讀條、場地特效與 debuff，不必湊人也不必進真副本
-- **收錄副本**：The Omega Protocol（TOP）各階段，可指定從哪一段開始
+- **收錄副本**：The Omega Protocol（TOP）各階段，可指定從哪一段開始；國際服版另收絕妖星亂舞（UMAD）九段（部分段落在多人連線時隊員看不到場地效果）
 - **打法切換**：同一個機制可選不同站位打法，場標預設一鍵套用
 - **多人連線**：最多八人同房共練，房主自架 relay，所有人看到同一份模擬
 - **失誤即時顯示**：踩中機制會標示原因；可開無敵練習，不會被打斷但仍計失誤
@@ -18,13 +18,21 @@ FFXIV 台服（繁中）版的 **AnoMech** 移植。在旅館裡生出假隊友�
 ## 安裝
 
 1. `/xlsettings` → **體驗性功能** → **自訂插件庫**
-2. 貼上來源網址後按 **+** 並儲存：
+2. 依你的伺服器貼上來源網址後按 **+** 並儲存（兩個只裝一個）：
+
+   台服：
 
    ```
    https://raw.githubusercontent.com/YS6720/AnoMechTC/main/repo.json
    ```
 
-3. `/xlplugins` → 搜尋 **AnoMech** → 安裝
+   國際服：
+
+   ```
+   https://raw.githubusercontent.com/YS6720/AnoMechTC/main/repo-global.json
+   ```
+
+3. `/xlplugins` → 搜尋 **AnoMech**（國際服顯示為「AnoMech（國際服）」）→ 安裝
 
 更新由 Dalamud 自動提示。
 
@@ -38,10 +46,11 @@ FFXIV 台服（繁中）版的 **AnoMech** 移植。在旅館裡生出假隊友�
 
 ## 建置
 
-需要台服 Dalamud（API 13／net9）與 .NET 9 SDK：
+台服版需要台服 Dalamud（API 13／net9）與 .NET 9 SDK；國際服版需要 Dalamud API 15（net10）與 .NET 10 SDK。同一資料夾有兩個專案檔，建置時要指名：
 
 ```powershell
-dotnet build AnoMechDev/AnoMech -c Release
+dotnet build AnoMechDev/AnoMech/AnoMech.csproj -c Release          # 台服
+dotnet build AnoMechDev/AnoMech/AnoMech.Global.csproj -c Release   # 國際服
 ```
 
 ## 授權

@@ -19,7 +19,7 @@ using AnoMech.Scenarios.Top.P5Delta;
 using AnoMech.Scenarios.Top.P5Omega;
 using AnoMech.Scenarios.Top.P5Sigma;
 using AnoMech.Scenarios.Top.P6WaveCannon2;
-// UMAD 相關 using 已移除（scenario 排除，見下方 Scenarios 陣列註解）
+using AnoMech.Compat.Server;
 using AnoMech.Scenarios.Uwu.UltimatePredation;
 using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
@@ -259,6 +259,8 @@ public sealed partial class Game : IDisposable
             new Scenarios.Top.P6AlphaOmega.TopP6AlphaOmegaScenario(),
             new TopP6WaveCannon2Scenario(),
         };
+        // 只在某一伺服器才有內容的場景（國際版的絕妖星亂舞）由伺服器層註冊。
+        handWritten.AddRange(ServerScenarios.Create());
         if (BuildEdition.IsDeveloper)
         {
             handWritten.Add(new UltimatePredationScenario());
@@ -414,6 +416,20 @@ public sealed partial class Game : IDisposable
             return false;
         }
 
+        // Per-player settings the fight can't produce together. Empty for solo (and a peer never
+        // builds a snapshot here), so only a host's own setup is refused. Every local entry point
+        // — Start, manual retry, the next chain entry, a room start — passes through here.
+        if (scenario.SettingsConflicts is { Count: > 0 } conflicts)
+        {
+            Core.ChatOutput.Error($"[AnoMech] 「{scenario.Name}」的個人設定無法同時成立，已拒絕啟動：");
+            foreach (var conflict in conflicts)
+            {
+                Plugin.Log.Warning($"Game: {scenario.Name} settings conflict -- {conflict}");
+                Core.ChatOutput.Error($"[AnoMech] {conflict}");
+            }
+            return false;
+        }
+
         // The one and only point a Data file is read for a run. Everything after this
         // — prepare, commit, every auto-retry — replays these exact bytes.
         RecordedTimelineSnapshot? recorded = null;
@@ -508,7 +524,14 @@ public sealed partial class Game : IDisposable
 
     public void Tick(float deltaSeconds)
     {
-        if (Paused) return;
+        if (Paused)
+        {
+            // D788：暫停中 World 不 Tick，原生 forced-follow 與本插件舉的混亂旗標要在這裡放開，
+            // 玩家才能和其他場景的暫停一樣自己走；恢復後由 SimParty／SimPlayer 依仍在的狀態重建。
+            World.Party.SuspendConfusedChases();
+            ServerNative.ReleaseControlAffliction();
+            return;
+        }
         if (networkPeer)
         {
             // Cosmetic world maintenance only; no scenario or mechanism scheduler.

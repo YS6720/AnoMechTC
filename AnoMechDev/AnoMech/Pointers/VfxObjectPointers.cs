@@ -8,6 +8,7 @@ namespace AnoMech.Pointers;
 // [MemberFunction]，並已離線在台服 ffxiv_dx11.exe 的 .text 掃過，**兩者皆唯一命中**：
 //   Create → RVA 0x6F1B87 ／ Update → RVA 0x7257AB
 // （抽取與掃描方式見 docs/upstream/TC-CS-BITFIELDS.md）
+// 國際服（2026.10.16）：與 CS 15.0.3.9 sig 逐字相同，解析到 Create RVA 0x7992C0／Update 0x45CB00。
 //
 // 兩個 sig 都以 E8 開頭＝比對的是 call 指令而非函式本體；Dalamud 的 ScanText 會自動
 // 沿 rel32 解析到被呼叫的函式，所以這裡不需要自己算偏移。

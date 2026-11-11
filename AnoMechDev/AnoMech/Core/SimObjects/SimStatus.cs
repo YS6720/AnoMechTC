@@ -1,4 +1,5 @@
 using System;
+using AnoMech.Core.Game;
 using AnoMech.Core.Game.Party;
 using AnoMech.Core.Native;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
@@ -25,6 +26,8 @@ public sealed unsafe class SimStatus : ISimObject
     public float? NativeRemainingOverride { get; private set; }
     public bool IsActive { get; private set; }
     public ushort Stacks { get; private set; }
+    // 上游 1646a70：新狀態先不寫進原生狀態列，等 Reveal（EnemyAction 的狀態在 ActionEffect 那刻才顯示）。
+    public bool Hidden { get; private set; }
     public float RemainingTime => duration <= 0f ? 0f : MathF.Max(0f, duration - elapsed);
 
     internal SimStatus(
@@ -34,7 +37,8 @@ public sealed unsafe class SimStatus : ISimObject
         ushort stacks,
         PartyRole? sourceRole = null,
         GameObjectId sourceObject = default,
-        float? nativeRemainingOverride = null)
+        float? nativeRemainingOverride = null,
+        bool hidden = false)
     {
         this.target = target;
         this.duration = MathF.Max(0f, duration);
@@ -44,10 +48,19 @@ public sealed unsafe class SimStatus : ISimObject
         NativeRemainingOverride = nativeRemainingOverride;
         IsActive = true;
         Stacks = stacks;
+        Hidden = hidden;
         if (statusId == Combat.Jobs.Paladin.PassageOfArms && stacks != 0)
             nativeStartDelay = MathF.Max(0f, RemainingTime - PassageNativeOnsetRemaining);
-        if (nativeStartDelay <= 0f)
+        if (!hidden && nativeStartDelay <= 0f)
             StartNative();
+    }
+
+    // 隱藏中的狀態此刻寫進原生狀態列；已顯示或已結束就不動。
+    internal void Reveal()
+    {
+        if (!IsActive || !Hidden) return;
+        Hidden = false;
+        if (nativeStartDelay <= 0f) StartNative();
     }
 
     private void StartNative()
@@ -114,10 +127,11 @@ public sealed unsafe class SimStatus : ISimObject
             elapsed = MathF.Min(duration, elapsed + deltaSeconds);
             if (elapsed >= duration)
             {
-                Despawn();
+                End(StatusLossReason.Expired);
                 return;
             }
         }
+        if (Hidden) return;
         if (nativeStartDelay > 0f)
         {
             nativeStartDelay = MathF.Max(0f, nativeStartDelay - deltaSeconds);
@@ -134,6 +148,7 @@ public sealed unsafe class SimStatus : ISimObject
         if (!Statuses.Has((Character*)target.BattleCharaPtr, StatusId, sourceObject))
         {
             IsActive = false;   // 槽位已空，不必再 Remove
+            RaiseLost(StatusLossReason.Removed);
             return;
         }
 
@@ -145,10 +160,17 @@ public sealed unsafe class SimStatus : ISimObject
             sourceObject);
     }
 
-    public void Despawn()
+    public void Despawn() => End(StatusLossReason.Removed);
+
+    private void End(StatusLossReason reason)
     {
         if (!IsActive) return;
         Statuses.Remove((Character*)target.BattleCharaPtr, StatusId, sourceObject);
         IsActive = false;
+        RaiseLost(reason);
     }
+
+    // 上游 1646a70 SimStatus.End：到期＝Expired、被移除＝Removed；沒有監聽者（拆場、成員端）時不送。
+    private void RaiseLost(StatusLossReason reason)
+        => target.SimEvents?.Raise(new StatusLost(target, StatusId, Stacks, reason));
 }

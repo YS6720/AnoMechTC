@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using AnoMech.Core.Game.Ai;
 using AnoMech.Core.Game.Party;
 using AnoMech.Scenarios;
 using AnoMech.Scenarios.Top.P3Monitors;
@@ -144,6 +145,30 @@ public class ConfigWindow : Window, IDisposable
             ImGui.SetTooltip("把每次傷害判定實際用到的範圍畫成外框，判定當下顯示 2 秒：\n" +
                 "有人被判中是紅色、沒人中是黃色。原本就有地面預警的招式不受影響，\n" +
                 "只是多一層外框；沒有預警的招式這樣才看得到真正的判定範圍。");
+
+        var showGuide = configuration.ShowGuideLine;
+        if (ImGui.Checkbox("顯示引導線（下一個機制該站的位置）", ref showGuide))
+        {
+            configuration.ShowGuideLine = showGuide;
+            configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("選了打法時，從腳下畫一條線到打法指定給你的下一個站位，\n" +
+                "目的地畫圓圈加十字；到點後留在腳下，換機制時跟著換。\n" +
+                "沒有站位資料的段落不會顯示。");
+
+        // 引導線延遲出現（Owner 11-05 追加）：0–10 秒、每格 0.5 秒，預設 0。
+        var guideDelay = GuideLine.ClampDelay(configuration.GuideLineDelaySeconds);
+        ImGui.SetNextItemWidth(180f);
+        if (ImGui.SliderFloat("引導線延遲出現（秒）", ref guideDelay, 0f, GuideLine.MaxDelaySeconds, "%.1f 秒"))
+        {
+            configuration.GuideLineDelaySeconds = GuideLine.ClampDelay(guideDelay);
+            configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("每次引導目標換成新的點，等這麼多秒才畫線（含到點後腳下的標記）；\n" +
+                "延遲中目標又換了就重新計時。暫停時不計時，倍速時照場景時間算；0＝立即顯示。\n" +
+                "秒數比這個機制剩下的時間還長時，那一步的線不會出現。");
 
         ImGui.Separator();
         DrawScenarioVisibility();

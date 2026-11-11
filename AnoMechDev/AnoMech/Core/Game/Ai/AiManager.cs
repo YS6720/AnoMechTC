@@ -13,17 +13,23 @@ namespace AnoMech.Core.Game.Ai;
 // reordering are handled inside the AiMove before it reaches here.
 public sealed class AiManager
 {
-    private const float RunSpeed = 6f;
+    private const float RunSpeed = AiSprintRules.RunSpeed;
+    // 上游 1646a70 同名。
+    public const float SprintSpeed = AiSprintRules.SprintSpeed;
     private const float DefaultJitter = 0.3f;
 
     private readonly SimWorld world;
     private readonly bool deferToArrival;
+    private readonly bool upstreamArrival;
     private readonly Random rng = new();
 
-    public AiManager(SimWorld world, bool deferToArrival = false)
+    // upstreamArrival：照上游 1646a70 規劃到點（跑速 6.5、盡量晚出發並提早 0.25 秒到、走不到就衝刺），
+    // 優先於 deferToArrival 與預設的立刻出發；只在已比對過上游時序的場景開啟。
+    public AiManager(SimWorld world, bool deferToArrival = false, bool upstreamArrival = false)
     {
         this.world = world;
         this.deferToArrival = deferToArrival;
+        this.upstreamArrival = upstreamArrival;
     }
 
     // Schedule a slot-move at `time`. `positions` is evaluated at fire-time;
@@ -31,8 +37,9 @@ public sealed class AiManager
     // Timed moves normally leave immediately at a paced speed. Imported timelines
     // opt into deferToArrival: wait until normal-speed travel reaches arrivalTime.
     // If the destination is too far away, leave immediately and arrive late.
+    // sprint（上游同名，opt-in）：見 AiSprintRules；衝刺時立即出發、以 SprintSpeed 前進並給衝刺狀態。
     public void Move(float time, Func<IAiMove> positions, float jitter = DefaultJitter, float arrivalTime = 0f,
-        Func<IReadOnlyList<Vector2?>>? practiceReference = null)
+        Func<IReadOnlyList<Vector2?>>? practiceReference = null, bool sprint = false)
     {
         var practiceStep = world.PracticePositions.Register(
             world.Events.Time + MathF.Max(0f, time),
@@ -55,7 +62,32 @@ public sealed class AiManager
                 if (local is not { } targetLocal) continue;
                 var member = world.Party.Get(i);
                 if (member == null || !member.IsAlive()) continue;
-                var target = Jitter(new Vector3(targetLocal.X, 0f, targetLocal.Y), jitter);
+                // 引導線：本機玩家座位的打法位置在發出時就寫入（延後出發也看得到）；玩家不抖動，
+                // 之後 MoveTo 經 PlayerMovement 再寫一次也是同一點。遠端玩家是連線替身，不寫。
+                var isPlayer = member is SimPlayer;
+                var exact = new Vector3(targetLocal.X, 0f, targetLocal.Y);
+                var target = isPlayer ? exact : Jitter(exact, jitter);
+                if (isPlayer)
+                    world.Guide.Publish(targetLocal, world.Events.Time);
+
+                if (upstreamArrival && (arrivalTime > time || !sprint))
+                {
+                    MoveUpstream(member, target, arrivalTime > time ? arrivalTime - time : null);
+                    continue;
+                }
+
+                if (sprint)
+                {
+                    var sx = target.X - member.Position.X;
+                    var sz = target.Z - member.Position.Z;
+                    var sprintDistance = MathF.Sqrt(sx * sx + sz * sz);
+                    if (AiSprintRules.Applies(true, sprintDistance, arrivalTime > time ? arrivalTime - time : null))
+                    {
+                        (member as ISimPartyMember)?.UseSprint(AiSprintRules.StatusSeconds(sprintDistance));
+                        member.MoveTo(target, SprintSpeed);
+                        continue;
+                    }
+                }
 
                 if (arrivalTime > time)
                 {
@@ -80,6 +112,20 @@ public sealed class AiManager
                 member.MoveTo(target);
             }
         });
+    }
+
+    private void MoveUpstream(SimCharacter member, Vector3 target, float? available)
+    {
+        var dx = target.X - member.Position.X;
+        var dz = target.Z - member.Position.Z;
+        var distance = MathF.Sqrt(dx * dx + dz * dz);
+        var (sprinting, delay) = available is { } seconds
+            ? AiSprintRules.PlanArrival(distance, seconds)
+            : (false, 0f);
+        var speed = sprinting ? SprintSpeed : AiSprintRules.UpstreamRunSpeed;
+        if (sprinting) (member as ISimPartyMember)?.UseSprint(AiSprintRules.StatusSeconds(distance));
+        if (delay > 0f) world.Events.Add(delay, () => member.MoveTo(target, speed));
+        else member.MoveTo(target, speed);
     }
 
     // Schedule temporary death-immunity for `role` at scenario-time `time`, lasting

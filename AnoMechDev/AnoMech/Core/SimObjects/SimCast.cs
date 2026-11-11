@@ -1,3 +1,7 @@
+using AnoMech.Core.Native;
+using AnoMech.Core.Native.Interfaces;
+using System.Collections.Generic;
+using AnoMech.Compat.Server;
 using AnoMech.Core.Game;
 using AnoMech.Multiplayer;
 using AnoMech.Pointers;
@@ -58,6 +62,8 @@ public sealed unsafe class SimCast : ISimObject
     // following boss roots itself while busy so the action animation finishes in
     // place instead of sliding.
     public bool IsBusy => IsCasting || remainingAnimationLock > 0f;
+
+    internal float RemainingAnimationLock => remainingAnimationLock;
 
     // SimCast is a persistent subsystem of its caster: the owning SimEnemy holds it
     // as a direct field and ticks/despawns it explicitly, never reaping it by
@@ -195,7 +201,7 @@ public sealed unsafe class SimCast : ISimObject
         if (parent is SimPlayer && parent.BattleCharaPtr is var chara && chara != null)
         {
             ref var cast = ref chara->CastInfo;
-            cast.ActionType = actionType;
+            cast.ActionType = ServerInterop.ActionTypeField(actionType);
             cast.ActionId = actionId;
             cast.SourceSequence = 0;
             cast.TargetId = targetId ?? new GameObjectId { ObjectId = 0xE0000000 };
@@ -268,9 +274,9 @@ public sealed unsafe class SimCast : ISimObject
             RotationInt = qRotation,
             SpellId = spellId,
             AnimationVariation = animationVariaton,
-            // 台服 CS 的 ActionEffectHandler.Header.ActionType 已是 ActionType enum
+            // ActionEffectHandler.Header.ActionType：台服 CS 是 ActionType enum、國際服是 byte
             // （ActorCastPacket 那邊仍是 byte，故上面 147 行保留轉型）
-            ActionType = actionType,
+            ActionType = ServerInterop.ActionTypeField(actionType),
             Flags = flags,
             NumTargets = (byte)(nullActionTarget ? 0 : 1)
         };
@@ -347,7 +353,7 @@ public sealed unsafe class SimCast : ISimObject
             RotationInt = MathUtil.QuantizeRotation(rotation ?? parent.Rotation),
             SpellId = spellId,
             AnimationVariation = animationVariation,
-            ActionType = actionType,
+            ActionType = ServerInterop.ActionTypeField(actionType),
             Flags = flags,
             NumTargets = (byte)count
         };
@@ -367,6 +373,95 @@ public sealed unsafe class SimCast : ISimObject
             ActionEffectHandler.Receive(parent.GameObjectId.ObjectId, (Character*)chara,
                 &globalPos, &header, effectPtr, targetPtr);
         CompleteLocalCast(parent, chara, actionId, actionType);
+    }
+
+    // 上游 1646a70 的帶效果 ActionEffect（EnemyActionHandler 專用的新路徑，上面兩個空 TargetEffects 的舊路徑不動）：
+    // 每個目標帶自己的效果條目，回傳 header 的 GlobalSequence 給 EffectResult 指名；沒送出回 null。
+    // GlobalSequence 取共用的 ActionEffects.NextGlobalSequence()（與 RotationSim 的玩家合成回包同一條），
+    // EffectResult 以它與目標索引對上這一份 ActionEffect；上面兩個舊路徑維持 0（不會被 EffectResult 對上）。
+    // 不在 CharacterManager 的目標要呼叫端先剔除（ApplyAll 會 null-deref），目標索引才對得上。
+    // 連線：照舊經 RecordNetworkActionEffect 捕捉（目標 id）；MP v11 表達不了效果條目與序號，
+    // 帶條目的就記 unsupported（失敗關閉），不讓隊友端靜默退化成零效果。
+    public uint? NativeActionEffect(uint actionId, float animationLock, ushort spellId, byte animationVariation,
+        ActionType actionType, byte flags, float rotation, Vector3 position, GameObjectId? animationTargetId,
+        IReadOnlyList<ActionEffectTarget> targets)
+    {
+        var chara = parent.BattleCharaPtr;
+        if (chara == null) return null;
+        var count = Math.Min(targets.Count, MaxEffectTargets);
+        var sequence = ActionEffects.NextGlobalSequence();
+        var globalPos = coordinates.ToGlobal(position);
+        var header = new ActionEffectHandler.Header
+        {
+            AnimationTargetId = animationTargetId ?? new GameObjectId { ObjectId = 0xE0000000 },
+            ActionId = actionId,
+            GlobalSequence = sequence,
+            AnimationLock = animationLock,
+            BallistaEntityId = 0xE0000000,
+            SourceSequence = 0,
+            RotationInt = MathUtil.QuantizeRotation(rotation),
+            SpellId = spellId,
+            AnimationVariation = animationVariation,
+            ActionType = ServerInterop.ActionTypeField(actionType),
+            Flags = flags,
+            NumTargets = (byte)count,
+        };
+        if (parent.NetworkEventSink is not null)
+        {
+            var ids = new GameObjectId[count];
+            var hasEntries = false;
+            for (var i = 0; i < count; i++)
+            {
+                ids[i] = targets[i].Id;
+                hasEntries |= targets[i].Effects is { Count: > 0 };
+            }
+            parent.RecordNetworkActionEffect(actionId, animationLock, spellId, animationVariation,
+                (byte)actionType, flags, ids, rotation, position, animationTargetId);
+            if (hasEntries)
+                parent.RecordNetworkUnsupported("action-effect entries");
+        }
+        Span<GameObjectId> targetIds = stackalloc GameObjectId[Math.Max(count, 1)];
+        Span<ActionEffectHandler.TargetEffects> effects = stackalloc ActionEffectHandler.TargetEffects[Math.Max(count, 1)];
+        effects.Clear();
+        targetIds[0] = new GameObjectId { ObjectId = 0xE0000000 };
+        for (var i = 0; i < count; i++)
+        {
+            targetIds[i] = targets[i].Id;
+            var entries = targets[i].Effects;
+            if (entries is null) continue;
+            for (var k = 0; k < entries.Count && k < MaxEffectsPerTarget; k++)
+            {
+                ref var effect = ref effects[i].Effects[k];
+                effect.Type = entries[k].Type;
+                effect.Param0 = entries[k].Param0;
+                effect.Param1 = entries[k].Param1;
+                effect.Param2 = entries[k].Param2;
+                effect.Param3 = entries[k].Param3;
+                effect.Param4 = entries[k].Param4;
+                effect.Value = entries[k].Value;
+            }
+        }
+        fixed (GameObjectId* targetPtr = targetIds)
+        fixed (ActionEffectHandler.TargetEffects* effectPtr = effects)
+            ActionEffectHandler.Receive(parent.GameObjectId.ObjectId, (Character*)chara,
+                &globalPos, &header, effectPtr, targetPtr);
+        CompleteLocalCast(parent, chara, actionId, actionType);
+        remainingAnimationLock = animationLock;
+        if (recordedCasting && ActionId == actionId) ResetCastState();
+        return sequence;
+    }
+
+    // ActionEffect32 is the largest the server sends; a target carries at most 8 entries.
+    private const int MaxEffectTargets = 32;
+    private const int MaxEffectsPerTarget = 8;
+
+    // 上游 1646a70：Interrupts the cast on the bar with the server's cancel ActorControl (0x0F).
+    public void Cancel(CastCancelReason reason)
+    {
+        var chara = parent.BattleCharaPtr;
+        if (chara == null) return;
+        parent.ActorControl.CancelCast(chara->CastInfo.ActionId, reason);
+        if (recordedCasting) ResetCastState();
     }
 
     // Mark/project after ActionManager.Update, then re-project at the actual HUD
@@ -434,7 +529,7 @@ public sealed unsafe class SimCast : ISimObject
         // Pair local synthetic start/finish even when the native receiver leaves
         // CastInfo untouched; an unrelated effect must not cancel this cast.
         if (parent is SimPlayer && chara->CastInfo.ActionId == actionId &&
-            chara->CastInfo.ActionType == actionType)
+            (byte)chara->CastInfo.ActionType == (byte)actionType)
         {
             CloseLocalCastBar(parent);
             chara->CastInfo.IsCasting = false;

@@ -1,3 +1,4 @@
+using AnoMech.Compat.Server;
 using AnoMech.Core.Game;
 using AnoMech.Helpers;
 using AnoMech.Pointers;
@@ -33,6 +34,9 @@ public class EventObjectSpawnConfig
     public float Radius { get; init; } = 1;
     public ushort FateId { get; init; } = 0;
     public byte EventState { get; init; } = 0;
+    // 上游 1646a70 同名：SpawnObjectPacket +0x30; the real EObj spawns carry 3 in the low byte plus a
+    // per-object index in the high word. 0＝封包原本的值。兩服寫入位置見 ServerInterop.SetSpawnArg2。
+    public uint Arg2 { get; init; } = 0;
 
     // This is the SG state index that means "visible" for this EObj.
     // The orb (1EB83C) is already visible at the engine default state=0, so leave it at 0.
@@ -73,6 +77,7 @@ public class EventObjectSpawnConfig
         var packetBytePtr = (byte*)&packet;
         var timelineStatePtr = (ushort*)(packetBytePtr + 0x2C);
         *timelineStatePtr = TimelineState;
+        ServerInterop.SetSpawnArg2(&packet, Arg2);
 
         return packet;
     }
@@ -218,10 +223,39 @@ public unsafe class SimEventObject : ISimObject, IPositioned
             ownedEntityId, 106, state, 0, 0, 0, 0, 0, 0xE0000000, 0, 0, false);
     }
 
+    // 上游 1646a70 同名：ActorControl 607 fades the EObj out（同上游，不 despawn）。ActorControl 以 EntityId
+    // 尋址；上游把每個預設 0 的 EObj 換成唯一 id，我方只有 UseSyntheticEntityId 的 EObj 唯一（預設 0 的
+    // 會共用），所以和 SetEventState 一樣只對 synthetic id 送，其他記警告不送。
+    public void FadeOut()
+    {
+        if (!IsAlive) return;
+        if (ownedEntityId == 0 || ownedEntityId != 0xE0000000u + 449u + (uint)slot)
+        {
+            Plugin.Log.Warning($"[SimEventObject.FadeOut] {DisplayName} 未以 UseSyntheticEntityId 生成，EntityId 不唯一，略過淡出。");
+            return;
+        }
+        PacketDispatcherPointers.HandleActorControlPacket(
+            ownedEntityId, 607, ownedEntityId, 1, 0, 100, 0, 0, 0, 0, 0xE0000000, false);
+    }
+
     // Convenience for parser-driven scenarios that emit SetVisible from
     // ACT 261|Change ModelStatus events. Flips between the configured
     // VisibleState and 0 (the engine default / "hidden" for gated SGs).
     public void SetVisible(bool visible) => SetState(visible ? visibleState : (ushort)0);
+
+    // 上游 1646a70 同名：ActorControl 413 plays one EObjAnimation beat (Param1 state, Param2 bitmask)
+    // on the EObj's SharedGroup。ActorControl 以 EntityId 尋址，同 FadeOut 只對 synthetic id 送。
+    public void PlayBeat(uint state, uint bitmask)
+    {
+        if (!IsAlive) return;
+        if (ownedEntityId == 0 || ownedEntityId != 0xE0000000u + 449u + (uint)slot)
+        {
+            Plugin.Log.Warning($"[SimEventObject.PlayBeat] {DisplayName} 未以 UseSyntheticEntityId 生成，EntityId 不唯一，略過動畫節拍。");
+            return;
+        }
+        PacketDispatcherPointers.HandleActorControlPacket(
+            ownedEntityId, 413, state, bitmask, 0, 0, 0, 0, 0, 0, 0xE0000000, false);
+    }
 
     public virtual void Tick(float deltaSeconds)
     {

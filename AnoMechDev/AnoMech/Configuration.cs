@@ -16,6 +16,13 @@ public class Configuration : IPluginConfiguration
     public bool EnableEventLogging { get; set; } = false;
     // 判定範圍顯示：把每次傷害判定實際用到的範圍畫出來（沒有原生預警的招式才看得出來）。
     public bool ShowHitRanges { get; set; } = false;
+    // 引導線（Owner 11-04 追加）：從腳下畫線到打法指定給自己座位的下一個站位。新欄位，預設關。
+    public bool ShowGuideLine { get; set; } = false;
+    // 引導線延遲出現（Owner 11-05 追加）：目的地換成新的點後等幾秒才畫線，0–10 秒、每格 0.5 秒。新欄位，預設 0＝立即顯示。
+    public float GuideLineDelaySeconds { get; set; } = 0f;
+    // 坦克減傷判定（上游 1646a70 EnableTankMitigation）：開了才檢查本人身上的減傷夠不夠擋新式招式（EnemyAction）。
+    // 新欄位，預設關；只由 property initializer 給首次預設值，reload 不覆寫使用者選擇。
+    public bool EnableTankMitigation { get; set; } = false;
 
     // 模擬區預設使用精簡操作列；完整面板仍可隨時開啟。只新增偏好，不改既有值。
     public bool CompactSimulationControls { get; set; } = true;
