@@ -79,11 +79,17 @@ public sealed class ActorControl
     // The server numbers every warp in the instance, counting up by one.
     private static uint warpSequence;
 
-    private readonly SimCharacter owner;
+    // null = the local player with no SimCharacter behind it: a fall between runs (after Reset)
+    // still has to be answered.
+    private readonly SimCharacter? owner;
 
     internal ActorControl(SimCharacter owner) => this.owner = owner;
 
-    private uint EntityId => owner.GameObjectId.ObjectId;
+    private ActorControl() { }
+
+    internal static ActorControl ForLocalPlayer() => new();
+
+    private uint EntityId => owner?.GameObjectId.ObjectId ?? Plugin.ObjectTable.LocalPlayer?.EntityId ?? 0;
 
     public void Send(uint category, uint arg1 = 0, uint arg2 = 0, uint arg3 = 0, uint arg4 = 0, uint arg5 = 0, uint arg6 = 0, uint arg7 = 0, uint arg8 = 0)
         => Dispatch(category, NoTarget, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
@@ -95,7 +101,7 @@ public sealed class ActorControl
     private void Dispatch(uint category, uint targetId, uint arg1, uint arg2, uint arg3, uint arg4, uint arg5, uint arg6, uint arg7, uint arg8)
     {
         if (EntityId is 0 or NoTarget) return;
-        if (owner.NetworkEventSink is not null)
+        if (owner?.NetworkEventSink is not null)
         {
             owner.RecordNetworkUnsupported($"actor control 0x{category:X}");
             return;

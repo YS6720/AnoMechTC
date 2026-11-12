@@ -81,8 +81,8 @@ internal static unsafe class ServerNative
     // sig 取上游 anomek/AnoMech master 1646a70 Core/Native/Implementations/Pointers/PacketDispatcherPointers.cs
     // HandlePlayerStateFlagsPacket；行為取同版 PlayerConditions.cs／SimPlayer.SyncStatusAffliction，只寫 63
     // （ControlAffliction），不寫 73。國際服 2026.10.16 exe 唯一命中 RVA 0xE16740；handler 逐 RowId 0..0x6F
-    // 取 Condition 表列，IsNetworked 的列各吃一個 bit，值與現值不同才寫（設計與反組譯：
-    // C:/dev-tmp/scratch/anomech-b10b/pre-review/design-v2.md＋v3／v4 delta）。
+    // 取 Condition 表列，IsNetworked 的列各吃一個 bit，值與現值不同才寫（設計與反組譯見 D788 審查的
+    // design-v2＋v3／v4 delta）。
     // 解析失敗只停用這一項（P1 混亂時不鎖，其他場景照常），不拋、不猜位址。
     internal const string PlayerStateFlagsSignature = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 54 41 56 41 57 48 83 EC 20 4C 8B FA 4C 8B E1 E8 ?? ?? ?? ?? 48 8B C8 48 8B D8 E8";
     // handler 迴圈上限（cmp ebx,70h）＝ Conditions 的 bool 數。
@@ -141,10 +141,7 @@ internal static unsafe class ServerNative
         var send = ServerPackets.ControlAfflictionSend(wanted, current, controlAfflictionRaised);
         if (send is { } value)
         {
-            var bits = stackalloc byte[ServerPackets.PlayerStateFlagsLength];
-            ServerPackets.PlayerStateFlags(NetworkedConditionRows, new System.ReadOnlySpan<byte>(conditions, ConditionCount),
-                ControlAfflictionRow, value, new System.Span<byte>(bits, ServerPackets.PlayerStateFlagsLength));
-            playerStateFlagsHandler(conditions, bits);
+            SendConditionFlag(conditions, ControlAfflictionRow, value);
         }
         var after = conditions[ControlAfflictionRow] != 0;
         if (send is { } sent)
@@ -165,6 +162,53 @@ internal static unsafe class ServerNative
 
     // 放下本插件舉起的 63；沒舉過不送（不清真伺服器的 63）。冪等。
     internal static void ReleaseControlAffliction() => SyncControlAffliction(false);
+
+    // 墜落接住（MapController.CatchFall）：國際服送上游 1646a70 的 ActorControl 0xED／0x107 與下方收尾。
+    internal static bool HandlesArenaFalls => true;
+
+    private static bool endClientLoadUnavailableLogged;
+
+    // 上游 PlayerConditions.EndClientLoad：墜落收尾時放下 client 自己舉起的 BetweenAreas 與
+    // OccupiedInQuestEvent，其他列照現值。組包一次只換一列，所以送兩次。
+    internal static void EndClientLoad()
+    {
+        if (playerStateFlagsHandler == null)
+        {
+            if (!endClientLoadUnavailableLogged)
+                DiagnosticLog.Warn("[墜落] PlayerStateFlags sig 未解析：墜落收尾無法放下 BetweenAreas／OccupiedInQuestEvent。");
+            endClientLoadUnavailableLogged = true;
+            return;
+        }
+        var conditions = (byte*)FFXIVClientStructs.FFXIV.Client.Game.Conditions.Instance();
+        if (conditions == null) return;
+        SendConditionFlag(conditions, (uint)ConditionFlag.BetweenAreas, false);
+        SendConditionFlag(conditions, (uint)ConditionFlag.OccupiedInQuestEvent, false);
+    }
+
+    private static void SendConditionFlag(byte* conditions, uint row, bool value)
+    {
+        var bits = stackalloc byte[ServerPackets.PlayerStateFlagsLength];
+        ServerPackets.PlayerStateFlags(NetworkedConditionRows, new System.ReadOnlySpan<byte>(conditions, ConditionCount),
+            row, value, new System.Span<byte>(bits, ServerPackets.PlayerStateFlagsLength));
+        playerStateFlagsHandler(conditions, bits);
+    }
+
+    // 墜落接回場中：上游 1646a70 BattleCharaProxy.SetPos（ActorSetPos type 0，經 client 自己處理伺服器
+    // 傳送的路徑）。只寫 GameObject 位置時，client 仍照原本的墜落速度往下掉：11-12 22:15:10 接回場中，
+    // 2 秒後已在 Y=-49（trace）。這條路徑能否停住墜落，以 MapController.CloseFall 的「收尾」Y 驗證。
+    internal static void PlaceLocalPlayer(System.Numerics.Vector3 position)
+    {
+        var lp = Plugin.ObjectTable.LocalPlayer;
+        if (lp == null) return;
+        var packet = new ActorSetPosPacket
+        {
+            RotationInt = MathUtil.QuantizeRotation(MathUtil.NormalizeRotation(lp.Rotation)),
+            X = position.X,
+            Y = position.Y,
+            Z = position.Z,
+        };
+        PacketHandlers.HandleActorSetPosPacket(lp.EntityId, &packet);
+    }
 
     private sealed class PacketHandlers
     {
@@ -189,6 +233,11 @@ internal static unsafe class ServerNative
         // they stand. Takes no payload; the handler loads the player itself.
         [Signature("48 8B 15 ?? ?? ?? ?? 48 85 D2 74 0C 48 8D 0D ?? ?? ?? ?? E9", UseFlags = SignatureUseFlags.Pointer, ScanType = ScanType.Text)]
         public static HandleForcedStopPacketDelegate HandleForcedStopPacket { get; private set; } = null!;
+
+        // 唯一命中 RVA 0xB39C40（國際服 2026.11.03 exe 離線掃描）。12-byte thunk shared in shape by many
+        // handlers; the pattern runs on into HandleActorMovePacket, which follows it, to stay unique.
+        [Signature("4C 8B C2 8B D1 48 8D 0D ?? ?? ?? ?? E9 ?? ?? ?? ?? CC CC CC CC CC CC CC CC CC CC CC CC CC CC CC 48 89 5C 24 08 57 48 83 EC 20 4C 63 05", UseFlags = SignatureUseFlags.Pointer, ScanType = ScanType.Text)]
+        public static HandleActorSetPosPacketDelegate HandleActorSetPosPacket { get; private set; } = null!;
     }
 
     // 上游 sig 在國際服命中兩個逐位元組相同的本體（0xB847C0、0xB848D0，各 0x10A bytes，
@@ -206,6 +255,7 @@ internal static unsafe class ServerNative
     private delegate void HandleForcedApproachPacketDelegate(ForcedApproachPacket* packet);
     private delegate void HandleForcedStopPacketDelegate(nint unused);
     private delegate void HandleMapEffectSnapshotPacketDelegate(EventFramework* framework, MapEffectSnapshotPacket* packet);
+    private delegate void HandleActorSetPosPacketDelegate(uint entityId, ActorSetPosPacket* packet);
 
     // EffectResult：讓 client 套用 ActionEffect 中該目標的傷害條目（含飛字）。HP 帶當下原生值
     // （上游同），handler 先套用排隊效果再寫回這個 HP，所以不改血量。

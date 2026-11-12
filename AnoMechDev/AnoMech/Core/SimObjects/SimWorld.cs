@@ -265,17 +265,9 @@ public sealed class SimWorld : ISimObject, IDisposable
 
     // How far an NPC at `position` (scenario-local) pushed away from `from` goes, at most `distance`.
     public float NpcPushDistance(Vector3 position, Vector3 from, float distance)
-    {
-        if (NpcKnockbackStopRadius is not { } radius) return distance;
-        var start = new Vector2(position.X, position.Z);
-        var away = start - new Vector2(from.X, from.Z);
-        if (away == Vector2.Zero) return distance;
-        var direction = Vector2.Normalize(away);
-        var along = Vector2.Dot(start, direction);
-        var discriminant = along * along - (start.LengthSquared() - radius * radius);
-        var toCircle = discriminant <= 0f ? 0f : MathF.Max(0f, -along + MathF.Sqrt(discriminant));
-        return MathF.Min(distance, toCircle);
-    }
+        => NpcKnockbackStopRadius is { } radius
+            ? ArenaBoundaryBounds.PushDistanceWithin(position, from, distance, radius)
+            : distance;
 
     // Allocates an EventObject actor in EventObjectManager's 40-slot pool and
     // wires it to the given EObj sheet row. Mirror of SpawnEnemy for the EObj

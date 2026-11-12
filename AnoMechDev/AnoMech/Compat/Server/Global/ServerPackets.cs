@@ -9,6 +9,19 @@ namespace AnoMech.Compat.Server;
 // 結構取上游 anomek/AnoMech master 1646a70
 // Core/Native/Implementations/Pointers/PacketDispatcherPointers.cs，欄位／Size／FieldOffset 照原檔。
 
+// The server's teleport of one actor. Type 0 is a plain placement; retail warps its own player with
+// 25 or 5, which also start a client load.
+[StructLayout(LayoutKind.Explicit, Size = 0x18)]
+public struct ActorSetPosPacket
+{
+    [FieldOffset(0x00)] public ushort RotationInt; // Quantized Rotation
+    [FieldOffset(0x02)] public byte Type;
+    [FieldOffset(0x03)] public byte Flags;
+    [FieldOffset(0x08)] public float X;
+    [FieldOffset(0x0C)] public float Y;
+    [FieldOffset(0x10)] public float Z;
+}
+
 // Range in yalms, whole numbers only.
 [StructLayout(LayoutKind.Explicit, Size = 0x8)]
 public struct ForcedApproachPacket

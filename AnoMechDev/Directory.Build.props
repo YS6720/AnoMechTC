@@ -22,6 +22,17 @@
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     <PreserveCompilationContext>false</PreserveCompilationContext>
     <NoWarn>$(NoWarn);CS1591;MSB3277</NoWarn>
+    <!-- 公開散布的 DLL 不得帶開發 repo 的網址與 commit：SDK 預設會把 git remote 寫進
+         RepositoryUrl、把 commit 接在 InformationalVersion 後面。關掉查詢後仍會留一個空值的
+         RepositoryUrl 中繼資料，連鍵一起不產。 -->
+    <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <GenerateRepositoryUrlAttribute>false</GenerateRepositoryUrlAttribute>
+    <!-- 也不帶 PDB：內嵌 PDB 會記下原始檔的建置機絕對路徑與只在 Developer 版有內容的檔名，
+         而且是壓縮存放，直接比對 DLL 位元組找不到。兩版一起關：配對建置要求 User／Developer
+         的 effective input 一致，只有一版關會被 build-editions.ps1 拒絕；代價是例外沒有行號。 -->
+    <DebugSymbols>false</DebugSymbols>
+    <DebugType>none</DebugType>
 
     <!-- 每個 server／版別／Configuration 都有自己的 bin、obj、project extensions。 -->
     <AnoMechBuildRoot Condition="'$(AnoMechBuildRoot)' == ''">$(MSBuildThisFileDirectory)</AnoMechBuildRoot>

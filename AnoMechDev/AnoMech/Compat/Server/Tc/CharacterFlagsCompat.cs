@@ -1,7 +1,7 @@
 // 台服 FFXIVClientStructs 0.0.6966 相容層：Character 的 bitfield 屬性在該版是 get-only，
 // 上游的 `chara->IsHostile = false` 這類指派編譯不過，必須直寫底層欄位。
 //
-// 位元遮罩**不是猜的**——由 `_scratch/il-probe/` 讀 getter 的 IL 抽出，
+// 位元遮罩**不是猜的**——由 IL 探針讀 getter 的 IL 抽出，
 // 事實表在 docs/upstream/TC-CS-BITFIELDS.md。台服升版後要重跑探針重驗。
 //
 // 集中在這一個檔而不是散在呼叫端：這些位元一旦 CS 版本變動就要一起改，散開會漏掉。

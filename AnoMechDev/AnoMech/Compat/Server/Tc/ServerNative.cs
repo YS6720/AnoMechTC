@@ -129,4 +129,16 @@ internal static class ServerNative
     {
     }
 
+    // 墜落接住只在國際服做：台服沒有 PlayerStateFlags sig，墜落用的 ActorControl 0xED／0x107 也沒在
+    // 台服核對過，不送未驗證的封包。MapController 共用碼引用 EndClientLoad／PlaceLocalPlayer，故留同簽章空實作。
+    internal static bool HandlesArenaFalls => false;
+
+    internal static void EndClientLoad()
+    {
+    }
+
+    internal static void PlaceLocalPlayer(System.Numerics.Vector3 position)
+    {
+    }
+
 }

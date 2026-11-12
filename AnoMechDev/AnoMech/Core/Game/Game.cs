@@ -524,6 +524,9 @@ public sealed partial class Game : IDisposable
 
     public void Tick(float deltaSeconds)
     {
+        // 上游 1646a70 Game.Tick：墜落每幀都接（暫停中也要），場景跑著時另判死。
+        if (World.Map.CatchFall(deltaSeconds) && activeScenario != null)
+            Player?.Die(FellOffCause);
         if (Paused)
         {
             // D788：暫停中 World 不 Tick，原生 forced-follow 與本插件舉的混亂旗標要在這裡放開，
@@ -550,6 +553,8 @@ public sealed partial class Game : IDisposable
         ObserveScenarioResult();
         AdvanceRetry(deltaSeconds);
     }
+
+    private const string FellOffCause = "墜落場外";
 
     private const float AutoRetryDelaySeconds = 2f;
     // 場景在「檢定通過」那一刻就呼叫 CompleteScenario，但後面通常還排著收尾的施法／動畫／退場事件。

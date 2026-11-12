@@ -1,4 +1,5 @@
 using AnoMech.Compat.Server;
+using AnoMech.Core.Game;
 using AnoMech.Helpers;
 using AnoMech.Multiplayer;
 using System;
@@ -77,10 +78,71 @@ public sealed class MapController : IDisposable
     // Revert to the saved inn territory and restore position.
     public void Unload()
     {
+        SettleFall();
+        fallOrigin = null;
         zone.Revert(false);
         IsInInstance = false;
         pendingColliderDrops.Clear();
         pendingSnapshot = null;
+    }
+
+    // ── Falls ─────────────────────────────────────────────────────────────────
+    // 移植上游 anomek/AnoMech 1646a70 InstanceSession.CatchFall／CloseFall／SettleFall（移植時漏了，
+    // Owner 2026-11-12：墜落就卡住，離場後也不能動、不能傳送）。The client reports its own fall once
+    // and, until retail answers, won't fall again and gets "too far" at every interaction until a real
+    // zone change. Caught early on purpose: moving a corpse back after a long fall left the client
+    // unable to fall or act again.
+
+    // Scenario-local Y below which the player has fallen off the arena; the whole stay puts them
+    // straight back at the centre, and a running scenario also kills them (Game.Tick).
+    private const float FallFloor = -5f;
+    private const float FallCloseDelay = 2f;
+    // Below the platform but not yet caught: the client has (or is about to have) reported the fall.
+    private const float FallingBelow = -0.5f;
+    // The loaded zone's origin (TryLoad); outlives Reset, which clears ScenarioOrigin.
+    private Vector3? fallOrigin;
+    private float fallCloseIn = -1f;
+    private readonly ActorControl playerControl = ActorControl.ForLocalPlayer();
+
+    // Per frame, paused or not. True when the player was below FallFloor and has been put back at
+    // the centre with retail's answer to the client's fall report; the close follows FallCloseDelay later.
+    internal bool CatchFall(float deltaSeconds)
+    {
+        if (fallCloseIn >= 0f && (fallCloseIn -= deltaSeconds) < 0f) CloseFall();
+        if (fallCloseIn >= 0f || fallOrigin is not { } origin || !ServerNative.HandlesArenaFalls) return false;
+        var lp = Plugin.ObjectTable.LocalPlayer;
+        if (lp == null || lp.Position.Y - origin.Y >= FallFloor) return false;
+        Core.CrashTrace.Log($"[墜落] 接住：({lp.Position.X:F1},{lp.Position.Y:F1},{lp.Position.Z:F1}) 送回場中");
+        playerControl.FellOutOfArena();
+        ServerNative.PlaceLocalPlayer(origin);
+        fallCloseIn = FallCloseDelay;
+        return true;
+    }
+
+    private void CloseFall()
+    {
+        playerControl.FallRecovered();
+        ServerNative.EndClientLoad();
+        fallCloseIn = -1f;
+        // 觀測：接回後 2 秒人是否站在平台上（Y≈0）。11-12 22:15 的失效是這裡已掉到 -49。
+        if (Plugin.ObjectTable.LocalPlayer is { } lp && fallOrigin is { } origin)
+            Core.CrashTrace.Log($"[墜落] 收尾：本地 Y={lp.Position.Y - origin.Y:F1}");
+    }
+
+    // Leaving or unloading mid-fall: the client would carry the fall into the inn (the restore only
+    // moves the character) with its report unanswered. Judged by height: the report's outbound
+    // opcode moves every patch and nothing keeps it current.
+    private void SettleFall()
+    {
+        if (fallOrigin is not { } origin || !ServerNative.HandlesArenaFalls) return;
+        var lp = Plugin.ObjectTable.LocalPlayer;
+        var falling = lp != null && lp.Position.Y - origin.Y < FallingBelow;
+        if (falling)
+        {
+            if (fallCloseIn < 0f) playerControl.FellOutOfArena();
+            ServerNative.PlaceLocalPlayer(origin);
+        }
+        if (falling || fallCloseIn >= 0f) CloseFall();
     }
 
     // Per-frame poll. Called from SimWorld.Tick.
@@ -165,6 +227,7 @@ public sealed class MapController : IDisposable
             else SetWeather(wid);               // restart/switch in a loaded zone: apply now
         }
         IsInInstance = true;
+        fallOrigin = target.Origin;
         effects.Loaded = true;
         InstanceContentDirectorHelper.Commence();
         ArmBarrierDrop(target.PlayerPosition, 10f);
@@ -225,6 +288,9 @@ public sealed class MapController : IDisposable
 
     public void Dispose()
     {
+        // 上游同：插件卸載時先收掉墜落，否則帶著未回答的墜落回房間。
+        try { SettleFall(); }
+        catch (Exception ex) { Core.CrashTrace.Log($"[墜落] Dispose 收尾失敗：{ex}"); }
         effects.Dispose();
         zone.Dispose();
     }
