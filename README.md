@@ -26,7 +26,7 @@ FFXIV 台服（繁中）版的 **AnoMech** 移植。在旅館裡生出假隊友�
    https://raw.githubusercontent.com/YS6720/AnoMechTC/main/repo.json
    ```
 
-   國際服：
+   國際服（請改用專屬的 [AnoMechTL](https://github.com/YS6720/AnoMechTL) 來源 `https://raw.githubusercontent.com/YS6720/AnoMechTL/main/repo-global.json`；下面的舊網址暫時保留）：
 
    ```
    https://raw.githubusercontent.com/YS6720/AnoMechTC/main/repo-global.json
